@@ -244,9 +244,11 @@ impl Memory {
         let offset = (addr - 0x0400_0000) as usize;
 
         match offset {
-            0x000 => 0x00, // DISPCNT - bit 7 should be set on read
-            0x004 | 0x006 => 0x00, // DISPSTAT, VCOUNT
-            0x130 => 0x10, // Key input (no keys pressed)
+            0x000 => self.io[offset] | 0x80, // DISPCNT - bit 7 is always set
+            0x004 => self.io[offset], // DISPSTAT
+            0x006 => self.io[offset], // VCOUNT (would be updated by PPU)
+            0x130 => 0xFF, // Key input low byte - all keys released (active low, all 1s)
+            0x131 => 0xFF, // Key input high byte - always 1
             _ => self.io[offset],
         }
     }

@@ -66,8 +66,11 @@ impl Input {
     }
 
     /// Get current key state as register value
+    /// GBA key input is active-low: 0 = pressed, 1 = released
     pub fn get_key_register(&self) -> u16 {
-        self.keys.bits() | 0x03FF // Ensure bits 10-15 are set
+        // Bits 0-9: Key states (active low)
+        // Bits 10-15: Always set to 1
+        (self.keys.bits() & 0x03FF) | 0xFC00
     }
 }
 

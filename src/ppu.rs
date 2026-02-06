@@ -74,8 +74,12 @@ pub struct Ppu {
     bldalpha: u16,
     bldy: u16,
 
-    // Reference to memory for VRAM, palette, OAM access
-    // (In real implementation, this would be shared)
+    // VRAM buffer (for testing and simple rendering)
+    // In a full implementation, this would be in the Memory system
+    vram: Box<[u8; 0x18000]>, // 96KB VRAM
+
+    // Sprite data (simplified OAM storage)
+    sprites: [(u16, u16, u16, u16, bool); 128], // (x, y, tile, priority, enabled)
 }
 
 impl Ppu {
@@ -101,11 +105,34 @@ impl Ppu {
             bldcnt: 0,
             bldalpha: 0,
             bldy: 0,
+            vram: Box::new([0; 0x18000]),
+            sprites: [(0, 0, 0, 0, false); 128],
         }
     }
 
     pub fn reset(&mut self) {
-        *self = Self::new();
+        self.dispcnt = DisplayControl::empty();
+        self.display_enabled = false;
+        self.dispstat = 0;
+        self.vcount = 0;
+        self.hcounter = 0;
+        self.bgcnt = [0; 4];
+        self.bg_hofs = [0; 4];
+        self.bg_vofs = [0; 4];
+        self.bg_affine = [[0x100, 0, 0, 0x100], [0x100, 0, 0, 0x100]];
+        self.bg_mosaic = 0;
+        self.obj_mosaic = 0;
+        self.win0_h = 0;
+        self.win0_v = 0;
+        self.win1_h = 0;
+        self.win1_v = 0;
+        self.winin = 0;
+        self.winout = 0;
+        self.bldcnt = 0;
+        self.bldalpha = 0;
+        self.bldy = 0;
+        self.vram.fill(0);
+        self.sprites = [(0, 0, 0, 0, false); 128];
     }
 
     // Display control
@@ -430,61 +457,108 @@ impl Ppu {
         self.bldalpha = (self.bldalpha & !0x1F00) | ((val.min(16) & 0x1F) << 8);
     }
 
-    // Mode 3: 16-bit bitmap
-    pub fn set_pixel_mode3(&mut self, _x: u16, _y: u16, _color: u16) {
-        // In real implementation, writes to VRAM
+    // Mode 3: 16-bit bitmap (240x160)
+    pub fn set_pixel_mode3(&mut self, x: u16, y: u16, color: u16) {
+        // Mode 3: 240x160, 16-bit color
+        // VRAM base: 0x0600_0000
+        // Each pixel is 2 bytes
+        if x < 240 && y < 160 {
+            let offset = ((y as usize * 240 + x as usize) * 2) as usize;
+            let bytes = color.to_le_bytes();
+            self.vram[offset] = bytes[0];
+            self.vram[offset + 1] = bytes[1];
+        }
     }
 
-    pub fn get_pixel_mode3(&self, _x: u16, _y: u16) -> u16 {
-        // In real implementation, reads from VRAM
-        0
+    pub fn get_pixel_mode3(&self, x: u16, y: u16) -> u16 {
+        // Mode 3: 240x160, 16-bit color
+        if x < 240 && y < 160 {
+            let offset = ((y as usize * 240 + x as usize) * 2) as usize;
+            u16::from_le_bytes([self.vram[offset], self.vram[offset + 1]])
+        } else {
+            0
+        }
     }
 
-    // Mode 4: 8-bit paletted bitmap
-    pub fn set_pixel_mode4(&mut self, _x: u16, _y: u16, _index: u8) {
-        // In real implementation, writes to VRAM with page switching
+    // Mode 4: 8-bit paletted bitmap (240x160)
+    pub fn set_pixel_mode4(&mut self, x: u16, y: u16, index: u8) {
+        // Mode 4: 240x160, 8-bit palette index
+        // Uses page switching for double buffering
+        // Page 0: 0x0600_0000, Page 1: 0x0600_A000
+        // Each pixel is 1 byte
+        if x < 240 && y < 160 {
+            let offset = (y as usize * 240 + x as usize) as usize;
+            self.vram[offset] = index;
+        }
     }
 
-    pub fn get_pixel_mode4(&self, _x: u16, _y: u16) -> u8 {
-        // In real implementation, reads from VRAM
-        0
+    pub fn get_pixel_mode4(&self, x: u16, y: u16) -> u8 {
+        // Mode 4: 240x160, 8-bit palette index
+        if x < 240 && y < 160 {
+            let offset = (y as usize * 240 + x as usize) as usize;
+            self.vram[offset]
+        } else {
+            0
+        }
     }
 
     // Sprite handling
-    pub fn set_sprite_x(&mut self, _num: usize, _x: u16) {
-        // In real implementation, writes to OAM
+    pub fn set_sprite_x(&mut self, num: usize, x: u16) {
+        if num < 128 {
+            self.sprites[num].0 = x;
+        }
     }
 
-    pub fn get_sprite_x(&self, _num: usize) -> u16 {
-        0
+    pub fn get_sprite_x(&self, num: usize) -> u16 {
+        if num < 128 {
+            self.sprites[num].0
+        } else {
+            0
+        }
     }
 
-    pub fn set_sprite_y(&mut self, _num: usize, _y: u16) {
-        // In real implementation, writes to OAM
+    pub fn set_sprite_y(&mut self, num: usize, y: u16) {
+        if num < 128 {
+            self.sprites[num].1 = y;
+        }
     }
 
-    pub fn get_sprite_y(&self, _num: usize) -> u16 {
-        0
+    pub fn get_sprite_y(&self, num: usize) -> u16 {
+        if num < 128 {
+            self.sprites[num].1
+        } else {
+            0
+        }
     }
 
-    pub fn set_sprite_tile(&mut self, _num: usize, _tile: u16) {
-        // In real implementation, writes to OAM
+    pub fn set_sprite_tile(&mut self, num: usize, tile: u16) {
+        if num < 128 {
+            self.sprites[num].2 = tile;
+        }
     }
 
-    pub fn set_sprite_priority(&mut self, _num: usize, _priority: u16) {
-        // In real implementation, writes to OAM
+    pub fn set_sprite_priority(&mut self, num: usize, priority: u16) {
+        if num < 128 {
+            self.sprites[num].3 = priority;
+        }
     }
 
     pub fn set_sprite_palette(&mut self, _num: usize, _palette: u16) {
-        // In real implementation, writes to OAM
+        // Stored in OAM in real implementation
     }
 
-    pub fn set_sprite_enabled(&mut self, _num: usize, _enabled: bool) {
-        // In real implementation, writes to OAM
+    pub fn set_sprite_enabled(&mut self, num: usize, enabled: bool) {
+        if num < 128 {
+            self.sprites[num].4 = enabled;
+        }
     }
 
-    pub fn is_sprite_enabled(&self, _num: usize) -> bool {
-        false
+    pub fn is_sprite_enabled(&self, num: usize) -> bool {
+        if num < 128 {
+            self.sprites[num].4
+        } else {
+            false
+        }
     }
 
     /// Step the PPU forward by given number of cycles

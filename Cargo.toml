@@ -1,0 +1,18 @@
+[package]
+name = "rgba"
+version = "0.1.0"
+edition = "2021"
+authors = ["RGBA Team"]
+description = "A Game Boy Advance emulator written in Rust with Behavior Driven Development"
+
+[dependencies]
+bitflags = "2.6"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[profile.dev]
+opt-level = 1
+
+[profile.test]
+opt-level = 1

@@ -141,8 +141,9 @@ fn cpu_sets_arithmetic_flags_based_on_operations() {
     cpu.set_pc(0x0800_0000);
 
     // And: ROM loaded with instruction
+    // ADDS R0, R0, R1 = 0xE0900001 (op=0100 for ADD, S=1)
     let mut rom = vec![0u8; 0x200];
-    let insn = 0xE080_0001u32.to_le_bytes(); // ADDS R0, R0, R1
+    let insn = 0xE090_0001u32.to_le_bytes(); // ADDS R0, R0, R1
     rom[0..4].copy_from_slice(&insn);
     mem.load_rom(rom);
 

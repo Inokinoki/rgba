@@ -326,6 +326,7 @@ impl Cpu {
         // Execute instruction, shift pipeline
         let opcode = self.pipeline[0];
         let instruction_pc = self.pipeline_pc[0];
+        let pc_at_execution = self.r[15];
 
         self.pipeline[0] = self.pipeline[1];
         self.pipeline_pc[0] = self.pipeline_pc[1];
@@ -333,16 +334,25 @@ impl Cpu {
         self.pipeline[1] = self.pipeline[2];
         self.pipeline_pc[1] = self.pipeline_pc[2];
 
-        // Fetch next instruction
-        self.pipeline_pc[2] = self.r[15];
-        self.pipeline[2] = mem.read_word(self.r[15]);
-        self.r[15] = self.r[15].wrapping_add(4);
-
         // Decode and execute with instruction PC
-        self.execute_arm_with_pc(opcode, mem, instruction_pc)
+        let cycles = self.execute_arm_with_pc(opcode, mem, instruction_pc, pc_at_execution);
+
+        // Only fetch next instruction if PC wasn't modified (branch, etc.)
+        if self.r[15] == pc_at_execution.wrapping_add(4) {
+            // PC was incremented normally, fetch next
+            self.pipeline_pc[2] = self.r[15];
+            self.pipeline[2] = mem.read_word(self.r[15]);
+            self.r[15] = self.r[15].wrapping_add(4);
+        } else {
+            // PC was modified by instruction (branch, etc.)
+            // Pipeline will be reloaded on next call
+            self.pipeline_loaded = false;
+        }
+
+        cycles
     }
 
-    fn execute_arm_with_pc(&mut self, opcode: u32, mem: &mut super::Memory, pc_at_execute: u32) -> u32 {
+    fn execute_arm_with_pc(&mut self, opcode: u32, mem: &mut super::Memory, instruction_pc: u32, pc_at_execution: u32) -> u32 {
         // ARM instruction decoding
         // Bits 27-26: Instruction category
         let category = (opcode >> 26) & 0x3;
@@ -372,7 +382,7 @@ impl Cpu {
             }
             0x3 => {
                 // Branch / Branch with link
-                self.execute_arm_branch(opcode, pc_at_execute)
+                self.execute_arm_branch(opcode, instruction_pc)
             }
             _ => 1, // Unknown, treat as NOP
         }
@@ -571,10 +581,9 @@ impl Cpu {
 
         // Calculate branch target
         let target = instruction_pc.wrapping_add(offset as u32);
-        self.set_pc(target);
 
-        // Flush pipeline after branch
-        self.pipeline_loaded = false;
+        // Set PC using set_pc which aligns to word boundary
+        self.set_pc(target);
 
         2 // Branch takes 2 cycles
     }

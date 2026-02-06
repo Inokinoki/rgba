@@ -61,8 +61,13 @@ fn arm_data_processing_instructions_modify_registers_and_flags() {
     cpu.set_reg(2, 5);
     cpu.set_pc(0x0800_0000);
 
+    // And: ROM loaded with instruction
+    let mut rom = vec![0u8; 0x200];
+    let insn = 0xE081_0002u32.to_le_bytes();
+    rom[0..4].copy_from_slice(&insn);
+    mem.load_rom(rom);
+
     // When: ADD R0, R1, R2 (0xE0810002) - Add R1 to R2, store in R0
-    mem.write_word(0x0800_0000, 0xE081_0002);
     cpu.step(&mut mem);
 
     // Then: Result should be stored in destination register
@@ -77,9 +82,14 @@ fn arm_branch_instructions_change_program_flow() {
 
     cpu.set_pc(0x0800_0000);
 
-    // When: Branch forward 20 instructions (B +20 * 4 = +80 bytes = 0x50)
-    // Opcode: 0xEA_00_00_14 (signed offset for +0x50 bytes)
-    mem.write_word(0x0800_0000, 0xEA_00_00_14);
+    // Given: ROM loaded with branch instruction
+    let mut rom = vec![0u8; 0x200];
+    let insn = 0xEA_00_00_14u32.to_le_bytes(); // Branch with offset 0x14
+    rom[0..4].copy_from_slice(&insn);
+    mem.load_rom(rom);
+
+    // When: Branch forward with offset 0x14 (0x50 bytes)
+    // Target = instruction_addr + offset = 0x0800_0000 + 0x50 = 0x0800_0050
     cpu.step(&mut mem);
 
     // Then: PC should be at branch target
@@ -97,16 +107,22 @@ fn arm_memory_instructions_read_and_write_memory() {
     cpu.set_reg(1, 0xDEAD_BEEF);
     cpu.set_pc(0x0800_0000);
 
+    // And: ROM loaded with store instruction
+    let mut rom = vec![0u8; 0x400];
+    let store_insn = 0xE580_1000u32.to_le_bytes();
+    let load_insn = 0xE590_2000u32.to_le_bytes();
+    rom[0..4].copy_from_slice(&store_insn);
+    rom[4..8].copy_from_slice(&load_insn);
+    mem.load_rom(rom);
+
     // When: STR R1, [R0] (0xE580_1000) - Store R1 to address in R0
-    mem.write_word(0x0800_0000, 0xE580_1000);
     cpu.step(&mut mem);
 
     // Then: Memory should contain the value
     assert_eq!(mem.read_word(0x0200_0000), 0xDEAD_BEEF, "Memory should contain stored value");
 
     // When: LDR R2, [R0] (0xE590_2000) - Load from address in R0 to R2
-    cpu.set_pc(0x0800_0000);
-    mem.write_word(0x0800_0000, 0xE590_2000);
+    cpu.set_pc(0x0800_0004); // Point to load instruction
     cpu.step(&mut mem);
 
     // Then: Register should contain loaded value
@@ -124,8 +140,13 @@ fn cpu_sets_arithmetic_flags_based_on_operations() {
     cpu.set_reg(1, 1);
     cpu.set_pc(0x0800_0000);
 
+    // And: ROM loaded with instruction
+    let mut rom = vec![0u8; 0x200];
+    let insn = 0xE080_0001u32.to_le_bytes(); // ADDS R0, R0, R1
+    rom[0..4].copy_from_slice(&insn);
+    mem.load_rom(rom);
+
     // When: ADDS R0, R0, R1 (0xE080_0001) - Add with S flag
-    mem.write_word(0x0800_0000, 0xE080_0001);
     cpu.step(&mut mem);
 
     // Then: Carry flag should be set (overflow)

@@ -71,6 +71,7 @@ pub struct Cpu {
 
     // Pipeline state
     pipeline: [u32; 3], // Prefetched instructions
+    pipeline_pc: [u32; 3], // PC values for each prefetched instruction
     pipeline_loaded: bool,
 }
 
@@ -88,6 +89,7 @@ impl Cpu {
             banked_spsr: [0; 6],
             cpsr: 0x0000001F, // System mode
             pipeline: [0; 3],
+            pipeline_pc: [0; 3],
             pipeline_loaded: false,
         }
     }
@@ -108,6 +110,7 @@ impl Cpu {
         self.r[14] = 0x0800_0000; // LR (link register) - points to ROM entry
         self.r[15] = 0x0800_0000; // PC (program counter) - ROM entry point
         self.pipeline = [0; 3];
+        self.pipeline_pc = [0; 3];
         self.pipeline_loaded = false;
     }
 
@@ -305,28 +308,41 @@ impl Cpu {
     fn step_arm(&mut self, mem: &mut super::Memory) -> u32 {
         // Load pipeline if needed
         if !self.pipeline_loaded {
+            self.pipeline_pc[0] = self.r[15];
             self.pipeline[0] = mem.read_word(self.r[15]);
             self.r[15] = self.r[15].wrapping_add(4);
+
+            self.pipeline_pc[1] = self.r[15];
             self.pipeline[1] = mem.read_word(self.r[15]);
             self.r[15] = self.r[15].wrapping_add(4);
+
+            self.pipeline_pc[2] = self.r[15];
             self.pipeline[2] = mem.read_word(self.r[15]);
             self.r[15] = self.r[15].wrapping_add(4);
+
             self.pipeline_loaded = true;
         }
 
         // Execute instruction, shift pipeline
         let opcode = self.pipeline[0];
+        let instruction_pc = self.pipeline_pc[0];
+
         self.pipeline[0] = self.pipeline[1];
+        self.pipeline_pc[0] = self.pipeline_pc[1];
+
         self.pipeline[1] = self.pipeline[2];
+        self.pipeline_pc[1] = self.pipeline_pc[2];
 
         // Fetch next instruction
+        self.pipeline_pc[2] = self.r[15];
         self.pipeline[2] = mem.read_word(self.r[15]);
+        self.r[15] = self.r[15].wrapping_add(4);
 
-        // Decode and execute
-        self.execute_arm(opcode, mem)
+        // Decode and execute with instruction PC
+        self.execute_arm_with_pc(opcode, mem, instruction_pc)
     }
 
-    fn execute_arm(&mut self, opcode: u32, mem: &mut super::Memory) -> u32 {
+    fn execute_arm_with_pc(&mut self, opcode: u32, mem: &mut super::Memory, pc_at_execute: u32) -> u32 {
         // ARM instruction decoding
         // Bits 27-26: Instruction category
         let category = (opcode >> 26) & 0x3;
@@ -356,7 +372,7 @@ impl Cpu {
             }
             0x3 => {
                 // Branch / Branch with link
-                self.execute_arm_branch(opcode, mem)
+                self.execute_arm_branch(opcode, pc_at_execute)
             }
             _ => 1, // Unknown, treat as NOP
         }
@@ -542,15 +558,24 @@ impl Cpu {
         1
     }
 
-    fn execute_arm_branch(&mut self, opcode: u32, _mem: &mut super::Memory) -> u32 {
+    fn execute_arm_branch(&mut self, opcode: u32, instruction_pc: u32) -> u32 {
         let offset = ((opcode as i32) << 8) >> 6; // Sign-extend and multiply by 4
         let link = ((opcode >> 24) & 1) != 0;
 
+        // instruction_pc is the address of the instruction being executed
+        // The branch offset is relative to this address
         if link {
-            self.set_lr(self.get_pc() - 4); // Return address
+            // Return address is the next instruction (instruction_pc + 4)
+            self.set_lr(instruction_pc.wrapping_add(4));
         }
 
-        self.set_pc(self.get_pc().wrapping_add(offset as u32));
+        // Calculate branch target
+        let target = instruction_pc.wrapping_add(offset as u32);
+        self.set_pc(target);
+
+        // Flush pipeline after branch
+        self.pipeline_loaded = false;
+
         2 // Branch takes 2 cycles
     }
 

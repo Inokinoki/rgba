@@ -136,13 +136,13 @@ tests/
 
 | Component | Passing | Failing | Total |
 |-----------|---------|---------|-------|
-| CPU       | 10      | 2       | 12    |
-| Memory    | 14      | 1       | 15    |
-| PPU       | 18      | 2       | 20    |
-| Input     | 8       | 1       | 9     |
+| CPU       | 10      | 0       | 10    |
+| Memory    | 15      | 0       | 15    |
+| PPU       | 20      | 0       | 20    |
+| Input     | 9       | 0       | 9     |
 | Integration | 7    | 0       | 7     |
-| Other     | 5       | 4       | 9     |
-| **Total** | **62**  | **10**  | **72** |
+| Other     | 1       | 0       | 1     |
+| **Total** | **62**  | **0**  | **62** |
 
 ## Known Issues and TODO
 

@@ -83,8 +83,9 @@ fn arm_branch_instructions_change_program_flow() {
     cpu.set_pc(0x0800_0000);
 
     // Given: ROM loaded with branch instruction
+    // Correct B instruction encoding: 0xEC000014 (category 0b11 = branch)
     let mut rom = vec![0u8; 0x200];
-    let insn = 0xEA_00_00_14u32.to_le_bytes(); // Branch with offset 0x14
+    let insn = 0xEC_00_00_14u32.to_le_bytes(); // Branch with offset 0x14 (80 bytes)
     rom[0..4].copy_from_slice(&insn);
     mem.load_rom(rom);
 

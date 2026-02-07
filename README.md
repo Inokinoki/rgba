@@ -110,6 +110,27 @@ cargo test --test input_behavior
 cargo test --test integration
 ```
 
+### Run Examples
+```bash
+# List all examples
+cargo run --example
+
+# Quick start demo
+cargo run --example quick_start
+
+# Graphics demonstration
+cargo run --example graphics_demo
+
+# CPU instruction testing
+cargo run --example cpu_test
+
+# Memory system testing
+cargo run --example memory_test
+
+# Input system demonstration
+cargo run --example input_demo
+```
+
 ### Run with Optimizations
 ```bash
 cargo test --release

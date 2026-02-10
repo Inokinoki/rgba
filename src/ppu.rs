@@ -251,6 +251,54 @@ impl Ppu {
         self.bgcnt[bg] = (self.bgcnt[bg] & !0x1F00) | ((base & 0x1F) << 8);
     }
 
+    /// Get the BG control register value
+    pub fn get_bgcnt(&self, bg: usize) -> u16 {
+        if bg > 3 {
+            return 0;
+        }
+        self.bgcnt[bg]
+    }
+
+    /// Set the BG control register value
+    pub fn set_bgcnt(&mut self, bg: usize, val: u16) {
+        if bg > 3 {
+            return;
+        }
+        self.bgcnt[bg] = val;
+    }
+
+    /// Get background horizontal offset
+    pub fn get_bg_hofs(&self, bg: usize) -> u16 {
+        if bg > 3 {
+            return 0;
+        }
+        self.bg_hofs[bg]
+    }
+
+    /// Set background horizontal offset
+    pub fn set_bg_hofs(&mut self, bg: usize, val: u16) {
+        if bg > 3 {
+            return;
+        }
+        self.bg_hofs[bg] = val & 0x1FF; // 9 bits (0-511)
+    }
+
+    /// Get background vertical offset
+    pub fn get_bg_vofs(&self, bg: usize) -> u16 {
+        if bg > 3 {
+            return 0;
+        }
+        self.bg_vofs[bg]
+    }
+
+    /// Set background vertical offset
+    pub fn set_bg_vofs(&mut self, bg: usize, val: u16) {
+        if bg > 3 {
+            return;
+        }
+        self.bg_vofs[bg] = val & 0x1FF; // 9 bits (0-511)
+    }
+
     // Affine background
     pub fn set_bg_affine_a(&mut self, bg: usize, val: u32) {
         if bg == 2 || bg == 3 {
@@ -559,6 +607,131 @@ impl Ppu {
         } else {
             false
         }
+    }
+
+    // === Tile Mode Rendering ===
+
+    /// Read a 16-bit value from VRAM at the given offset
+    fn read_vram_half(&self, offset: usize) -> u16 {
+        if offset + 1 < self.vram.len() {
+            u16::from_le_bytes([self.vram[offset], self.vram[offset + 1]])
+        } else {
+            0
+        }
+    }
+
+    /// Get palette color (RGB555) for the given palette index
+    /// pal_num: 0 for BG palette, 1 for OBJ palette
+    /// index: color index (0-255)
+    pub fn get_palette_color(&self, pal_num: usize, index: u16) -> u16 {
+        // Palette is stored in Memory, not PPU
+        // For now, we'll need to get this from Memory
+        // This is a placeholder - the actual implementation will be in Gba
+        0
+    }
+
+    /// Get tile pixel for 4bpp tile (mode 0, 1, 2 text backgrounds)
+    /// tile_base: VRAM offset to tile data (character base)
+    /// tile_num: tile number
+    /// x, y: pixel within tile (0-7)
+    /// palette_num: palette number (0-15) for 4bpp tiles
+    /// flip_h: horizontal flip
+    /// flip_v: vertical flip
+    pub fn get_tile_pixel_4bpp(
+        &self,
+        tile_base: usize,
+        tile_num: u16,
+        x: u8,
+        y: u8,
+        palette_num: u16,
+        flip_h: bool,
+        flip_v: bool,
+    ) -> u8 {
+        // Each 4bpp tile is 32 bytes (8x8 pixels, 4 bits per pixel)
+        let tile_offset = tile_base + (tile_num as usize * 32);
+
+        // Handle flipping
+        let x = if flip_h { 7 - x } else { x };
+        let y = if flip_v { 7 - y } else { y };
+
+        // Each row is 4 bytes (8 pixels at 4 bits each)
+        let row_offset = tile_offset + (y as usize * 4);
+
+        // Each pixel is 4 bits (nibble)
+        let pixel_nibble = if x % 2 == 0 {
+            // Low nibble
+            (self.vram[row_offset + (x as usize / 2)]) & 0x0F
+        } else {
+            // High nibble
+            (self.vram[row_offset + (x as usize / 2)]) >> 4
+        };
+
+        pixel_nibble
+    }
+
+    /// Get tile pixel for 8bpp tile (mode 4 bitmap, or mode 2/4 BG with 256-color)
+    /// tile_base: VRAM offset to tile data
+    /// tile_num: tile number
+    /// x, y: pixel within tile (0-7)
+    /// flip_h: horizontal flip
+    /// flip_v: vertical flip
+    pub fn get_tile_pixel_8bpp(
+        &self,
+        tile_base: usize,
+        tile_num: u16,
+        x: u8,
+        y: u8,
+        flip_h: bool,
+        flip_v: bool,
+    ) -> u8 {
+        // Each 8bpp tile is 64 bytes (8x8 pixels, 8 bits per pixel)
+        let tile_offset = tile_base + (tile_num as usize * 64);
+
+        // Handle flipping
+        let x = if flip_h { 7 - x } else { x };
+        let y = if flip_v { 7 - y } else { y };
+
+        // Each row is 8 bytes
+        let pixel_offset = tile_offset + (y as usize * 8) + (x as usize);
+
+        self.vram[pixel_offset]
+    }
+
+    /// Get screen entry (tile map entry) for text backgrounds
+    /// screen_base: VRAM offset to screen block (map base)
+    /// x, y: tile position in screen (varies by BG size)
+    /// bg_size: background size (0-3 from BG Control register)
+    pub fn get_screen_entry(
+        &self,
+        screen_base: usize,
+        x: u16,
+        y: u16,
+        bg_size: u16,
+        width: u16,
+        height: u16,
+    ) -> u16 {
+        // Screen entry size varies by BG:
+        // BG size 0: 256x256 (32x32 tiles) - 1 screen block
+        // BG size 1: 512x256 (64x32 tiles) - 2 screen blocks
+        // BG size 2: 256x512 (32x64 tiles) - 2 screen blocks
+        // BG size 3: 512x512 (64x64 tiles) - 4 screen blocks
+
+        let screen_x = x % width;
+        let screen_y = y % height;
+        let entry_offset = screen_base + ((screen_y * width + screen_x) as usize * 2);
+
+        self.read_vram_half(entry_offset)
+    }
+
+    /// Parse screen entry to get tile information
+    pub fn parse_screen_entry(entry: u16) -> (u16, bool, bool, u16, u16) {
+        let tile_num = entry & 0x3FF;
+        let flip_h = (entry & 0x400) != 0;
+        let flip_v = (entry & 0x800) != 0;
+        let palette_num = (entry >> 12) & 0xF;
+        let priority = (entry >> 10) & 0x3;
+
+        (tile_num, flip_h, flip_v, palette_num, priority)
     }
 
     /// Step the PPU forward by given number of cycles

@@ -271,6 +271,28 @@ impl Memory {
             }
         }
     }
+
+    /// Read a palette color entry (16-bit RGB555)
+    /// pal_num: 0 for BG palette, 1 for OBJ palette
+    /// index: color index (0-255)
+    pub fn read_palette_color(&self, pal_num: usize, index: u16) -> u16 {
+        // Palette RAM is at 0x0500_0000
+        // BG palette: 0x0500_0000 - 0x0500_01FF (512 bytes, 256 colors)
+        // OBJ palette: 0x0500_0200 - 0x0500_03FF (512 bytes, 256 colors)
+        let offset = if pal_num == 0 {
+            // BG palette
+            (index as usize * 2) & 0x3FF
+        } else {
+            // OBJ palette (offset by 0x200)
+            0x200 + ((index as usize * 2) & 0x1FF)
+        };
+
+        if offset + 1 < self.palette.len() {
+            u16::from_le_bytes([self.palette[offset], self.palette[offset + 1]])
+        } else {
+            0
+        }
+    }
 }
 
 impl Default for Memory {

@@ -154,6 +154,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for y in 0..height {
             for x in 0..width {
                 let color = match mode {
+                    0 | 1 | 2 => {
+                        // Tile/text modes
+                        let c = gba.get_pixel_tile_mode(x as u16, y as u16);
+                        let r = ((c >> 0) & 0x1F) as u8;
+                        let g = ((c >> 5) & 0x1F) as u8;
+                        let b = ((c >> 10) & 0x1F) as u8;
+                        ((r as u32 * 255 / 31) << 16) |
+                        ((g as u32 * 255 / 31) << 8) |
+                        (b as u32 * 255 / 31)
+                    }
                     3 => {
                         // Mode 3: 16-bit bitmap
                         let c = ppu.get_pixel_mode3(x as u16, y as u16);
@@ -167,9 +177,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     4 => {
                         // Mode 4: 8-bit paletted
                         let idx = ppu.get_pixel_mode4(x as u16, y as u16) as u32;
-                        // Grayscale for simplicity
-                        let v = (idx * 255 / 255) as u32;
-                        (v << 16) | (v << 8) | v
+                        // Get actual palette color
+                        let c = gba.get_palette_color(0, idx as u16);
+                        let r = ((c >> 0) & 0x1F) as u8;
+                        let g = ((c >> 5) & 0x1F) as u8;
+                        let b = ((c >> 10) & 0x1F) as u8;
+                        ((r as u32 * 255 / 31) << 16) |
+                        ((g as u32 * 255 / 31) << 8) |
+                        (b as u32 * 255 / 31)
                     }
                     _ => {
                         // Test pattern for unsupported modes

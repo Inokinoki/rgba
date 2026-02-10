@@ -118,6 +118,139 @@ impl Gba {
     pub fn cpu(&self) -> &Cpu {
         &self.cpu
     }
+
+    /// Get a reference to the memory system (for palette access)
+    pub fn mem(&self) -> &Memory {
+        &self.mem
+    }
+
+    /// Read palette color (RGB555) from palette RAM
+    /// pal_num: 0 for BG palette, 1 for OBJ palette
+    /// index: color index (0-255)
+    pub fn get_palette_color(&self, pal_num: usize, index: u16) -> u16 {
+        self.mem.read_palette_color(pal_num, index)
+    }
+
+    /// Get pixel color for tile/text modes (0, 1, 2)
+    /// Returns RGB555 color value
+    pub fn get_pixel_tile_mode(&self, x: u16, y: u16) -> u16 {
+        let ppu = &self.ppu;
+        let mode = ppu.get_display_mode();
+
+        match mode {
+            0 | 1 | 2 => {
+                // Tile/text modes - render backgrounds from lowest to highest priority
+                let mut color = 0; // Default: transparent (black)
+
+                // Check each background layer (BG0-BG3)
+                for bg in 0..4 {
+                    if ppu.is_bg_enabled(bg) {
+                        // Get BG control register
+                        let bgcnt = ppu.get_bgcnt(bg);
+                        let priority = ppu.get_bg_priority(bg);
+
+                        // Background size encoding
+                        let bg_size = (bgcnt >> 14) & 0x3;
+
+                        // Get dimensions based on size and mode
+                        let (width, height) = match (mode, bg_size) {
+                            // Regular BG (BG0, BG1 in modes 0, 1)
+                            (_, 0) => (256u16, 256u16),
+                            (_, 1) => (512u16, 256u16),
+                            (_, 2) => (256u16, 512u16),
+                            (_, 3) => (512u16, 512u16),
+                            _ => (256u16, 256u16),
+                        };
+
+                        // Affine BG (BG2, BG3 in mode 2) use different dimensions
+                        let (width, height) = if mode == 2 && (bg == 2 || bg == 3) {
+                            match bg_size {
+                                0 => (128u16, 128u16),
+                                1 => (256u16, 256u16),
+                                2 => (512u16, 512u16),
+                                3 => (1024u16, 1024u16),
+                                _ => (128u16, 128u16),
+                            }
+                        } else {
+                            (width, height)
+                        };
+
+                        // Apply scroll offset
+                        let hofs = ppu.get_bg_hofs(bg);
+                        let vofs = ppu.get_bg_vofs(bg);
+                        let bg_x = ((x as u32 + hofs as u32) % width as u32) as u16;
+                        let bg_y = ((y as u32 + vofs as u32) % height as u32) as u16;
+
+                        // Get tile coordinates
+                        let tile_x = bg_x / 8;
+                        let tile_y = bg_y / 8;
+                        let pixel_x = bg_x % 8;
+                        let pixel_y = bg_y % 8;
+
+                        // Get screen entry (tile map entry)
+                        let screen_base = ppu.get_bg_map_base(bg) as usize;
+                        let entry = ppu.get_screen_entry(
+                            screen_base,
+                            tile_x,
+                            tile_y,
+                            bg_size,
+                            width / 8,
+                            height / 8,
+                        );
+
+                        // Parse screen entry
+                        let (tile_num, flip_h, flip_v, palette_num, _priority) =
+                            Ppu::parse_screen_entry(entry);
+
+                        // Check if 8bpp or 4bpp
+                        let is_8bpp = (bgcnt & 0x80) != 0;
+
+                        // Get tile data
+                        let tile_base = ppu.get_bg_tile_base(bg) as usize;
+
+                        let color_index = if is_8bpp {
+                            ppu.get_tile_pixel_8bpp(
+                                tile_base,
+                                tile_num,
+                                pixel_x as u8,
+                                pixel_y as u8,
+                                flip_h,
+                                flip_v,
+                            )
+                        } else {
+                            ppu.get_tile_pixel_4bpp(
+                                tile_base,
+                                tile_num,
+                                pixel_x as u8,
+                                pixel_y as u8,
+                                palette_num,
+                                flip_h,
+                                flip_v,
+                            )
+                        };
+
+                        // If not transparent (0), use this color
+                        if color_index != 0 {
+                            // Get actual palette color
+                            let pal_index = if is_8bpp {
+                                color_index as u16
+                            } else {
+                                (palette_num * 16) + color_index as u16
+                            };
+                            color = self.get_palette_color(0, pal_index);
+
+                            // For now, take the first non-transparent pixel
+                            // In a full implementation, we'd layer by priority
+                            return color;
+                        }
+                    }
+                }
+
+                color
+            }
+            _ => 0, // Other modes handled elsewhere
+        }
+    }
 }
 
 impl Default for Gba {

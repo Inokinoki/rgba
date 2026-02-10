@@ -91,6 +91,33 @@ impl Gba {
     pub fn load_rom(&mut self, data: Vec<u8>) {
         self.mem.load_rom(data);
     }
+
+    /// Loads a ROM from a file path
+    pub fn load_rom_path(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use std::fs;
+        use std::io::Read;
+
+        let mut file = fs::File::open(path)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+        self.load_rom(data);
+        Ok(())
+    }
+
+    /// Get a reference to the PPU
+    pub fn ppu(&self) -> &Ppu {
+        &self.ppu
+    }
+
+    /// Get a mutable reference to the input system
+    pub fn input_mut(&mut self) -> &mut Input {
+        &mut self.input
+    }
+
+    /// Get a reference to the CPU
+    pub fn cpu(&self) -> &Cpu {
+        &self.cpu
+    }
 }
 
 impl Default for Gba {

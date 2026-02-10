@@ -8,6 +8,9 @@ description = "A Game Boy Advance emulator written in Rust with Behavior Driven 
 [dependencies]
 bitflags = "2.6"
 
+# Optional GUI dependencies
+minifb = { version = "0.25", optional = true }
+
 [dev-dependencies]
 criterion = "0.5"
 
@@ -16,3 +19,7 @@ opt-level = 1
 
 [profile.test]
 opt-level = 1
+
+[features]
+default = []
+gui = ["minifb"]

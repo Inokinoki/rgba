@@ -429,6 +429,18 @@ impl Cpu {
                                     ((result as i32) < 0));
                 }
             }
+            0x3 => {
+                // RSB
+                let (result, overflow) = op2_val.overflowing_sub(rn_val);
+                self.r[rd] = result;
+                if s {
+                    self.set_flag_n((result as i32) < 0);
+                    self.set_flag_z(result == 0);
+                    self.set_flag_c(!overflow);
+                    self.set_flag_v(((op2_val as i32) < (rn_val as i32)) ^
+                                    ((result as i32) < 0));
+                }
+            }
             0x4 => {
                 // ADD
                 let (result, overflow) = rn_val.overflowing_add(op2_val);
@@ -443,11 +455,60 @@ impl Cpu {
                                     (result as i32) > 0));
                 }
             }
-            0xD => {
-                // MOV
-                self.r[rd] = op2_val;
+            0x5 => {
+                // ADC
+                let c = if self.get_flag_c() { 1 } else { 0 };
+                let (result1, overflow1) = rn_val.overflowing_add(op2_val);
+                let (result, overflow2) = result1.overflowing_add(c);
+                self.r[rd] = result;
                 if s {
-                    self.set_flags_from_result(op2_val);
+                    self.set_flag_n((result as i32) < 0);
+                    self.set_flag_z(result == 0);
+                    self.set_flag_c(overflow1 || overflow2);
+                    self.set_flag_v(((rn_val as i32) > 0 && (op2_val as i32) > 0) ||
+                                   ((result as i32) < 0));
+                }
+            }
+            0x6 => {
+                // SBC
+                let c = if self.get_flag_c() { 1 } else { 0 };
+                let (result1, overflow1) = rn_val.overflowing_sub(op2_val);
+                let (result, overflow2) = result1.overflowing_sub(c - 1);
+                self.r[rd] = result;
+                if s {
+                    self.set_flag_n((result as i32) < 0);
+                    self.set_flag_z(result == 0);
+                    self.set_flag_c(overflow1 || overflow2);
+                    self.set_flag_v(((rn_val as i32) < (op2_val as i32)) ^
+                                    ((result as i32) < 0));
+                }
+            }
+            0x7 => {
+                // RSC
+                let c = if self.get_flag_c() { 1 } else { 0 };
+                let (result1, overflow1) = op2_val.overflowing_sub(rn_val);
+                let (result, overflow2) = result1.overflowing_sub(c - 1);
+                self.r[rd] = result;
+                if s {
+                    self.set_flag_n((result as i32) < 0);
+                    self.set_flag_z(result == 0);
+                    self.set_flag_c(overflow1 || overflow2);
+                    self.set_flag_v(((op2_val as i32) < (rn_val as i32)) ^
+                                    ((result as i32) < 0));
+                }
+            }
+            0x8 => {
+                // TST
+                let result = rn_val & op2_val;
+                if s {
+                    self.set_flags_from_result(result);
+                }
+            }
+            0x9 => {
+                // TEQ
+                let result = rn_val ^ op2_val;
+                if s {
+                    self.set_flags_from_result(result);
                 }
             }
             0xA => {
@@ -461,14 +522,54 @@ impl Cpu {
                                     ((result as i32) < 0));
                 }
             }
-            _ => {
-                // Other operations not yet implemented
-                // TODO: Implement all ARM data processing instructions
+            0xB => {
+                // CMN
+                let (result, overflow) = rn_val.overflowing_add(op2_val);
+                if s {
+                    self.set_flag_n((result as i32) < 0);
+                    self.set_flag_z(result == 0);
+                    self.set_flag_c(overflow);
+                    self.set_flag_v(((rn_val as i32) > 0 && (op2_val as i32) > 0 &&
+                                    (result as i32) < 0) ||
+                                   ((rn_val as i32) < 0 && (op2_val as i32) < 0 &&
+                                    (result as i32) > 0));
+                }
             }
+            0xC => {
+                // ORR
+                let result = rn_val | op2_val;
+                self.r[rd] = result;
+                if s {
+                    self.set_flags_from_result(result);
+                }
+            }
+            0xD => {
+                // MOV
+                self.r[rd] = op2_val;
+                if s {
+                    self.set_flags_from_result(op2_val);
+                }
+            }
+            0xE => {
+                // BIC
+                let result = rn_val & !op2_val;
+                self.r[rd] = result;
+                if s {
+                    self.set_flags_from_result(result);
+                }
+            }
+            0xF => {
+                // MVN
+                self.r[rd] = !op2_val;
+                if s {
+                    self.set_flags_from_result(!op2_val);
+                }
+            }
+            _ => {}
         }
 
         self.r[15] = self.r[15].wrapping_add(4);
-        1 // 1 cycle for data processing
+        1
     }
 
     fn decode_operand2(&self, operand2: u32) -> u32 {
@@ -507,8 +608,66 @@ impl Cpu {
         // C and V depend on the operation
     }
 
-    fn execute_arm_psr(&mut self, _opcode: u32, _mem: &mut super::Memory) -> u32 {
-        // MRS/MSR - not yet implemented
+    fn execute_arm_psr(&mut self, opcode: u32, _mem: &mut super::Memory) -> u32 {
+        let mrs = (opcode & (1 << 21)) != 0;
+        let psr = (opcode & (1 << 22)) != 0; // 0 = CPSR, 1 = SPSR
+
+        if mrs {
+            // MRS - Transfer PSR to register
+            let rd = ((opcode >> 12) & 0xF) as usize;
+            if psr {
+                // MRS Rd, SPSR_<mode>
+                self.r[rd] = self.get_spsr();
+            } else {
+                // MRS Rd, CPSR
+                self.r[rd] = self.cpsr;
+            }
+        } else {
+            // MSR - Transfer register to PSR
+            let rm = (opcode & 0xF) as usize;
+            let immediate = (opcode & (1 << 25)) != 0;
+
+            let val = if immediate {
+                // Rotate immediate value
+                let imm = opcode & 0xFF;
+                let rotate = ((opcode >> 8) & 0xF) * 2;
+                imm.rotate_right(rotate) as u32
+            } else {
+                self.r[rm]
+            };
+
+            let apply_flags = (opcode & 0x10000) != 0;
+            let apply_control = (opcode & 0x20000) != 0;
+            let apply_status = (opcode & 0x40000) != 0;
+            let apply_extension = (opcode & 0x80000) != 0;
+
+            if psr {
+                // MSR SPSR_<mode>, {Rm|#imm}
+                let mut spsr = self.get_spsr();
+                if apply_flags {
+                    spsr = (spsr & 0x0FFFFF00) | (val & 0x000000FF);
+                }
+                if apply_control || apply_status || apply_extension {
+                    spsr = (spsr & 0x000000FF) | (val & 0xFFFFFF00);
+                }
+                self.set_spsr(spsr);
+            } else {
+                // MSR CPSR, {Rm|#imm}
+                if apply_flags {
+                    self.cpsr = (self.cpsr & 0x0FFFFF00) | (val & 0x000000FF);
+                }
+                if apply_control || apply_status || apply_extension {
+                    self.cpsr = (self.cpsr & 0x000000FF) | (val & 0xFFFFFF00);
+                    // Mode change might have happened
+                    let new_mode = Mode::from_bits(self.cpsr);
+                    if new_mode != self.get_mode() {
+                        self.set_mode(new_mode);
+                    }
+                }
+            }
+        }
+
+        self.r[15] = self.r[15].wrapping_add(4);
         1
     }
 
@@ -563,9 +722,59 @@ impl Cpu {
         2 // Memory access takes at least 2 cycles
     }
 
-    fn execute_arm_load_store_register(&mut self, _opcode: u32, _mem: &mut super::Memory) -> u32 {
-        // Not yet implemented
-        1
+    fn execute_arm_load_store_register(&mut self, opcode: u32, mem: &mut super::Memory) -> u32 {
+        let load = ((opcode >> 20) & 1) != 0;
+        let byte = ((opcode >> 22) & 1) != 0;
+        let writeback = ((opcode >> 21) & 1) != 0;
+        let pre_index = ((opcode >> 24) & 1) != 0;
+        let add = ((opcode >> 23) & 1) != 0;
+        let rn = ((opcode >> 16) & 0xF) as usize;
+        let rd = ((opcode >> 12) & 0xF) as usize;
+        let rm = (opcode & 0xF) as usize;
+
+        let shift_type = (opcode >> 5) & 0x3;
+        let shift_amount = ((opcode >> 7) & 0x1F) as u32;
+
+        let mut offset = self.r[rm];
+        match shift_type {
+            0 => offset <<= shift_amount, // LSL
+            1 => offset >>= shift_amount, // LSR
+            2 => offset = ((offset as i32) >> shift_amount) as u32, // ASR
+            3 => offset = offset.rotate_right(shift_amount), // ROR
+            _ => {}
+        }
+
+        let base = self.r[rn] as i64;
+        let addr = if add {
+            (base + offset as i64) as u32
+        } else {
+            (base - offset as i64) as u32
+        };
+
+        if load {
+            if byte {
+                self.r[rd] = mem.read_byte(addr) as u32;
+            } else {
+                self.r[rd] = mem.read_word(addr);
+            }
+        } else {
+            if byte {
+                mem.write_byte(addr, self.r[rd] as u8);
+            } else {
+                mem.write_word(addr, self.r[rd]);
+            }
+        }
+
+        if writeback {
+            if pre_index {
+                self.r[rn] = addr;
+            } else {
+                self.r[rn] = addr;
+            }
+        }
+
+        self.r[15] = self.r[15].wrapping_add(4);
+        2
     }
 
     fn execute_arm_branch(&mut self, opcode: u32, instruction_pc: u32) -> u32 {
@@ -588,8 +797,760 @@ impl Cpu {
         2 // Branch takes 2 cycles
     }
 
-    fn step_thumb(&mut self, _mem: &mut super::Memory) -> u32 {
-        // TODO: Implement Thumb instruction execution
+    fn step_thumb(&mut self, mem: &mut super::Memory) -> u32 {
+        // Load pipeline if needed
+        if !self.pipeline_loaded {
+            let pc = self.r[15];
+            self.pipeline_pc[0] = pc;
+            self.pipeline[0] = mem.read_half(pc) as u32;
+            self.r[15] = self.r[15].wrapping_add(2);
+
+            self.pipeline_pc[1] = self.r[15];
+            self.pipeline[1] = mem.read_half(self.r[15]) as u32;
+            self.r[15] = self.r[15].wrapping_add(2);
+
+            self.pipeline_pc[2] = self.r[15];
+            self.pipeline[2] = mem.read_half(self.r[15]) as u32;
+            self.r[15] = self.r[15].wrapping_add(2);
+
+            self.pipeline_loaded = true;
+        }
+
+        // Execute instruction, shift pipeline
+        let opcode = self.pipeline[0] as u16;
+        let instruction_pc = self.pipeline_pc[0];
+        let pc_at_execution = self.r[15];
+
+        self.pipeline[0] = self.pipeline[1];
+        self.pipeline_pc[0] = self.pipeline_pc[1];
+
+        self.pipeline[1] = self.pipeline[2];
+        self.pipeline_pc[1] = self.pipeline_pc[2];
+
+        // Decode and execute
+        let cycles = self.execute_thumb(opcode, mem, instruction_pc);
+
+        // Only fetch next instruction if PC wasn't modified
+        if self.r[15] == pc_at_execution.wrapping_add(2) {
+            self.pipeline_pc[2] = self.r[15];
+            self.pipeline[2] = mem.read_half(self.r[15]) as u32;
+            self.r[15] = self.r[15].wrapping_add(2);
+        } else {
+            self.pipeline_loaded = false;
+        }
+
+        cycles
+    }
+
+    fn execute_thumb(&mut self, opcode: u16, mem: &mut super::Memory, instruction_pc: u32) -> u32 {
+        // Thumb instruction decoding
+        // Bits 15-13 determine the instruction category
+        let category = (opcode >> 13) & 0x7;
+
+        match category {
+            0b000 => {
+                // Category 0: Move shifted register, ADD/SUB immediate
+                if (opcode & 0xF800) == 0x0000 || (opcode & 0xF800) == 0x0800 ||
+                   (opcode & 0xF800) == 0x1000 || (opcode & 0xF800) == 0x1800 {
+                    self.thumb_shift_register(opcode)
+                } else {
+                    self.thumb_add_sub_imm(opcode)
+                }
+            }
+            0b001 => {
+                // Category 1: ADD/SUB/CMP/MOV immediate
+                self.thumb_data_proc_imm(opcode)
+            }
+            0b010 => {
+                // Category 2: Data processing register
+                let op = (opcode >> 6) & 0xF;
+                if op <= 0x9 {
+                    self.thumb_data_proc_reg(opcode)
+                } else if (opcode & 0xFC00) == 0x4400 {
+                    // Hi register operations / BX
+                    self.thumb_hi_reg_ops(opcode)
+                } else {
+                    self.thumb_load_pc_rel(opcode, mem)
+                }
+            }
+            0b011 => {
+                // Category 3: Load/store with offset
+                let op = (opcode >> 11) & 0x3;
+                match op {
+                    0b00 => self.thumb_load_store_reg_offset(opcode, mem, false),
+                    0b01 => self.thumb_load_store_reg_offset(opcode, mem, true),
+                    0b10 => self.thumb_load_store_word_byte(opcode, mem, false),
+                    0b11 => self.thumb_load_store_word_byte(opcode, mem, true),
+                    _ => 1
+                }
+            }
+            0b100 => {
+                // Category 4: Load/store sign-extended, halfword, sp-relative
+                let op = (opcode >> 10) & 0x3;
+                match op {
+                    0b00 => self.thumb_load_store_halfword(opcode, mem, false),
+                    0b01 => self.thumb_load_store_halfword(opcode, mem, true),
+                    0b10 => self.thumb_load_store_sp_rel(opcode, mem, false),
+                    0b11 => self.thumb_load_store_sp_rel(opcode, mem, true),
+                    _ => 1
+                }
+            }
+            0b101 => {
+                // Category 5: Load address, add offset to SP, push/pop
+                if (opcode & 0xF800) == 0xA000 {
+                    self.thumb_load_addr(opcode)
+                } else if (opcode & 0xFF00) == 0xB000 {
+                    self.thumb_add_sp(opcode)
+                } else if (opcode & 0xF600) == 0xB400 {
+                    self.thumb_push_pop(opcode, mem, true)
+                } else if (opcode & 0xF600) == 0xBC00 {
+                    self.thumb_push_pop(opcode, mem, false)
+                } else if (opcode & 0xF000) == 0xC000 {
+                    self.thumb_load_store_multiple(opcode, mem, true)
+                } else if (opcode & 0xF000) == 0xD000 {
+                    self.thumb_load_store_multiple(opcode, mem, false)
+                } else {
+                    1
+                }
+            }
+            0b110 => {
+                // Category 6: Conditional branch, SWI, unconditional branch
+                if (opcode & 0xF800) == 0xE000 {
+                    self.thumb_branch_cond(opcode, instruction_pc)
+                } else if (opcode & 0xFF00) == 0xDF00 {
+                    self.thumb_software_interrupt()
+                } else {
+                    self.thumb_branch(opcode, instruction_pc)
+                }
+            }
+            0b111 => {
+                // Category 7: Long branch with link
+                if (opcode & 0xF800) == 0xF000 {
+                    self.thumb_bl_prefix(opcode, instruction_pc)
+                } else {
+                    self.thumb_bl_suffix(opcode, instruction_pc)
+                }
+            }
+            _ => 1
+        }
+    }
+
+    // Thumb instruction implementations
+
+    fn thumb_shift_register(&mut self, opcode: u16) -> u32 {
+        let op = (opcode >> 11) & 0x3;
+        let rm = ((opcode >> 3) & 0x7) as usize;
+        let rd = (opcode & 0x7) as usize;
+        let offset = ((opcode >> 6) & 0x1F) as u32;
+
+        let mut result = self.r[rm];
+
+        match op {
+            0b00 => {
+                // LSL
+                let shift = offset.min(32);
+                self.set_flag_c(if shift != 0 {
+                    let bit = 32 - shift;
+                    if bit <= 31 { (result >> bit) & 1 != 0 } else { false }
+                } else {
+                    self.get_flag_c()
+                });
+                result = if shift < 32 { result << shift } else { 0 };
+            }
+            0b01 => {
+                // LSR
+                let shift = offset.min(32);
+                self.set_flag_c(if shift != 0 {
+                    (result >> (shift - 1)) & 1 != 0
+                } else {
+                    self.get_flag_c()
+                });
+                result = if shift < 32 { result >> shift } else { 0 };
+            }
+            0b10 => {
+                // ASR
+                let shift = offset.min(32);
+                self.set_flag_c(if shift != 0 {
+                    (result as i32 >> (shift - 1)) & 1 != 0
+                } else {
+                    self.get_flag_c()
+                });
+                result = ((result as i32) >> shift.min(31)) as u32;
+            }
+            _ => {}
+        }
+
+        self.r[rd] = result;
+        self.set_flag_n((result as i32) < 0);
+        self.set_flag_z(result == 0);
+        self.r[15] = self.r[15].wrapping_add(2);
+        1
+    }
+
+    fn thumb_add_sub_imm(&mut self, opcode: u16) -> u32 {
+        let op = (opcode >> 9) & 0x3;
+        let rn = ((opcode >> 6) & 0x7) as usize;
+        let rd = (opcode & 0x7) as usize;
+        let imm = ((opcode >> 3) & 0x7) as u32;
+
+        let rn_val = self.r[rn];
+
+        match op {
+            0b00 => {
+                // ADD Rd, Rn, #imm
+                let (result, overflow) = rn_val.overflowing_add(imm);
+                self.r[rd] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(overflow);
+                self.set_flag_v(((rn_val as i32) > 0 && (imm as i32) > 0 && (result as i32) < 0) ||
+                               ((rn_val as i32) < 0 && (imm as i32) < 0 && (result as i32) > 0));
+            }
+            0b01 => {
+                // SUB Rd, Rn, #imm
+                let (result, overflow) = rn_val.overflowing_sub(imm);
+                self.r[rd] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(!overflow);
+                self.set_flag_v(((rn_val as i32) < (imm as i32)) ^ ((result as i32) < 0));
+            }
+            0b10 => {
+                // ADD Rd, Rn, #imm (with Rn = imm3:Rd)
+                let rn_val = ((opcode >> 3) & 0x7 | (rd as u16 & 0x8)) as u32;
+                let (result, overflow) = rn_val.overflowing_add(imm);
+                self.r[rd] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(overflow);
+            }
+            0b11 => {
+                // SUB Rd, Rn, #imm (with Rn = imm3:Rd)
+                let rn_val = ((opcode >> 3) & 0x7 | (rd as u16 & 0x8)) as u32;
+                let (result, overflow) = rn_val.overflowing_sub(imm);
+                self.r[rd] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(!overflow);
+            }
+            _ => {}
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        1
+    }
+
+    fn thumb_data_proc_imm(&mut self, opcode: u16) -> u32 {
+        let op = (opcode >> 11) & 0x3;
+        let rd = ((opcode >> 8) & 0x7) as usize;
+        let imm = (opcode & 0xFF) as u32;
+
+        let rd_val = self.r[rd];
+
+        match op {
+            0b00 => {
+                // MOV Rd, #imm
+                self.r[rd] = imm;
+                self.set_flag_n((imm as i32) < 0);
+                self.set_flag_z(imm == 0);
+            }
+            0b01 => {
+                // CMP Rd, #imm
+                let (result, overflow) = rd_val.overflowing_sub(imm);
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(!overflow);
+                self.set_flag_v(((rd_val as i32) < (imm as i32)) ^ ((result as i32) < 0));
+            }
+            0b10 => {
+                // ADD Rd, #imm
+                let (result, overflow) = rd_val.overflowing_add(imm);
+                self.r[rd] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(overflow);
+                self.set_flag_v(((rd_val as i32) > 0 && (imm as i32) > 0 && (result as i32) < 0) ||
+                               ((rd_val as i32) < 0 && (imm as i32) < 0 && (result as i32) > 0));
+            }
+            0b11 => {
+                // SUB Rd, #imm
+                let (result, overflow) = rd_val.overflowing_sub(imm);
+                self.r[rd] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(!overflow);
+                self.set_flag_v(((rd_val as i32) < (imm as i32)) ^ ((result as i32) < 0));
+            }
+            _ => {}
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        1
+    }
+
+    fn thumb_data_proc_reg(&mut self, opcode: u16) -> u32 {
+        let op = (opcode >> 6) & 0xF;
+        let rms = ((opcode >> 3) & 0x7) as usize;
+        let rds = (opcode & 0x7) as usize;
+
+        let rm_val = self.r[rms];
+        let rd_val = self.r[rds];
+
+        match op {
+            0x0 => {
+                // AND Rd, Rm
+                let result = rd_val & rm_val;
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+            }
+            0x1 => {
+                // EOR Rd, Rm
+                let result = rd_val ^ rm_val;
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+            }
+            0x2 => {
+                // LSL Rd, Rm
+                let shift = (rm_val & 0xFF).min(32);
+                self.set_flag_c(if shift != 0 {
+                    let bit = 32 - shift;
+                    if bit <= 31 { (rd_val >> bit) & 1 != 0 } else { false }
+                } else {
+                    self.get_flag_c()
+                });
+                let result = if shift < 32 { rd_val << shift } else { 0 };
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+            }
+            0x3 => {
+                // LSR Rd, Rm
+                let shift = (rm_val & 0xFF).min(32);
+                self.set_flag_c(if shift != 0 {
+                    (rd_val >> (shift - 1)) & 1 != 0
+                } else {
+                    self.get_flag_c()
+                });
+                let result = if shift < 32 { rd_val >> shift } else { 0 };
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+            }
+            0x4 => {
+                // ASR Rd, Rm
+                let shift = (rm_val & 0xFF).min(32);
+                self.set_flag_c(if shift != 0 {
+                    (rd_val as i32 >> (shift - 1)) & 1 != 0
+                } else {
+                    self.get_flag_c()
+                });
+                let result = ((rd_val as i32) >> shift.min(31)) as u32;
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+            }
+            0x5 => {
+                // ADC Rd, Rm
+                let c = if self.get_flag_c() { 1 } else { 0 };
+                let (result1, overflow1) = rd_val.overflowing_add(rm_val);
+                let (result, overflow2) = result1.overflowing_add(c);
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(overflow1 || overflow2);
+            }
+            0x6 => {
+                // SBC Rd, Rm
+                let c = if self.get_flag_c() { 1 } else { 0 };
+                let (result1, overflow1) = rd_val.overflowing_sub(rm_val);
+                let (result, overflow2) = result1.overflowing_sub(c - 1);
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(overflow1 || overflow2);
+            }
+            0x7 => {
+                // ROR Rd, Rm
+                let shift = (rm_val & 0xFF) % 32;
+                self.set_flag_c(if shift != 0 {
+                    (rd_val >> (shift - 1)) & 1 != 0
+                } else {
+                    self.get_flag_c()
+                });
+                let result = rd_val.rotate_right(shift);
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+            }
+            0x8 => {
+                // TST Rd, Rm
+                let result = rd_val & rm_val;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+            }
+            0x9 => {
+                // NEG Rd, Rm
+                let (result, overflow) = 0u32.overflowing_sub(rm_val);
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(overflow);
+                self.set_flag_v(rm_val == 0x80000000);
+            }
+            0xA => {
+                // CMP Rd, Rm
+                let (result, overflow) = rd_val.overflowing_sub(rm_val);
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(!overflow);
+                self.set_flag_v(((rd_val as i32) < (rm_val as i32)) ^ ((result as i32) < 0));
+            }
+            0xB => {
+                // CMN Rd, Rm
+                let (result, overflow) = rd_val.overflowing_add(rm_val);
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(overflow);
+            }
+            0xC => {
+                // ORR Rd, Rm
+                let result = rd_val | rm_val;
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+            }
+            0xD => {
+                // MUL Rd, Rm
+                let result = rd_val.wrapping_mul(rm_val);
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+            }
+            0xE => {
+                // BIC Rd, Rm
+                let result = rd_val & !rm_val;
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+            }
+            0xF => {
+                // MVN Rd, Rm
+                let result = !rm_val;
+                self.r[rds] = result;
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+            }
+            _ => {}
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        1
+    }
+
+    fn thumb_hi_reg_ops(&mut self, opcode: u16) -> u32 {
+        let op = (opcode >> 8) & 0x3;
+        let hd = ((opcode >> 7) & 1) != 0;
+        let hsr = ((opcode >> 6) & 1) != 0;
+
+        let rd = ((opcode & 0x7) | ((hd as u16) << 3)) as usize;
+        let rs = (((opcode >> 3) & 0x7) | ((hsr as u16) << 3)) as usize;
+
+        match op {
+            0b00 => {
+                // ADD
+                let (result, overflow) = self.r[rd].overflowing_add(self.r[rs]);
+                self.r[rd] = result;
+                if !hd || !hsr {
+                    self.set_flag_n((result as i32) < 0);
+                    self.set_flag_z(result == 0);
+                    self.set_flag_c(overflow);
+                    self.set_flag_v(((self.r[rd] as i32) > 0 && (self.r[rs] as i32) > 0 && (result as i32) < 0) ||
+                                   ((self.r[rd] as i32) < 0 && (self.r[rs] as i32) < 0 && (result as i32) > 0));
+                }
+            }
+            0b01 => {
+                // CMP
+                let (result, overflow) = self.r[rd].overflowing_sub(self.r[rs]);
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(!overflow);
+                self.set_flag_v(((self.r[rd] as i32) < (self.r[rs] as i32)) ^ ((result as i32) < 0));
+            }
+            0b10 => {
+                // MOV
+                self.r[rd] = self.r[rs];
+                if !hd || !hsr {
+                    self.set_flag_n((self.r[rs] as i32) < 0);
+                    self.set_flag_z(self.r[rs] == 0);
+                }
+            }
+            0b11 => {
+                // BX
+                let target = self.r[rs];
+                self.set_thumb_mode((target & 1) != 0);
+                self.set_pc(target);
+                return 2;
+            }
+            _ => {}
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        1
+    }
+
+    fn thumb_load_pc_rel(&mut self, opcode: u16, mem: &mut super::Memory) -> u32 {
+        let rd = ((opcode >> 8) & 0x7) as usize;
+        let imm = ((opcode & 0xFF) * 4) as u32;
+
+        let pc = self.r[15] & !0x3; // Align to word
+        let addr = pc.wrapping_add(imm);
+
+        self.r[rd] = mem.read_word(addr);
+        self.r[15] = self.r[15].wrapping_add(2);
+        2
+    }
+
+    fn thumb_load_store_reg_offset(&mut self, opcode: u16, mem: &mut super::Memory, byte: bool) -> u32 {
+        let ro = ((opcode >> 6) & 0x7) as usize;
+        let rb = ((opcode >> 3) & 0x7) as usize;
+        let rd = (opcode & 0x7) as usize;
+
+        let addr = self.r[rb].wrapping_add(self.r[ro]);
+
+        if byte {
+            self.r[rd] = mem.read_byte(addr) as u32;
+        } else {
+            self.r[rd] = mem.read_word(addr);
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        2
+    }
+
+    fn thumb_load_store_word_byte(&mut self, opcode: u16, mem: &mut super::Memory, load: bool) -> u32 {
+        let offset = (((opcode >> 6) & 0x1F) * 4) as u32;
+        let rb = ((opcode >> 3) & 0x7) as usize;
+        let rd = (opcode & 0x7) as usize;
+        let byte = ((opcode >> 12) & 1) != 0;
+
+        let addr = self.r[rb].wrapping_add(offset);
+
+        if load {
+            if byte {
+                self.r[rd] = mem.read_byte(addr) as u32;
+            } else {
+                self.r[rd] = mem.read_word(addr);
+            }
+        } else {
+            if byte {
+                mem.write_byte(addr, self.r[rd] as u8);
+            } else {
+                mem.write_word(addr, self.r[rd]);
+            }
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        2
+    }
+
+    fn thumb_load_store_halfword(&mut self, opcode: u16, mem: &mut super::Memory, load: bool) -> u32 {
+        let offset = (((opcode >> 6) & 0x1F) * 2) as u32;
+        let rb = ((opcode >> 3) & 0x7) as usize;
+        let rd = (opcode & 0x7) as usize;
+
+        let addr = self.r[rb].wrapping_add(offset);
+
+        if load {
+            self.r[rd] = mem.read_half(addr) as u32;
+        } else {
+            mem.write_half(addr, self.r[rd] as u16);
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        2
+    }
+
+    fn thumb_load_store_sp_rel(&mut self, opcode: u16, mem: &mut super::Memory, load: bool) -> u32 {
+        let rd = ((opcode >> 8) & 0x7) as usize;
+        let offset = ((opcode & 0xFF) * 4) as u32;
+
+        let addr = self.r[13].wrapping_add(offset);
+
+        if load {
+            self.r[rd] = mem.read_word(addr);
+        } else {
+            mem.write_word(addr, self.r[rd]);
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        2
+    }
+
+    fn thumb_load_addr(&mut self, opcode: u16) -> u32 {
+        let rd = ((opcode >> 8) & 0x7) as usize;
+        let offset = ((opcode & 0xFF) * 4) as u32;
+
+        let sp = ((opcode >> 11) & 1) != 0;
+
+        let base = if sp { self.r[13] } else { self.r[15] & !0x3 };
+        self.r[rd] = base.wrapping_add(offset);
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        1
+    }
+
+    fn thumb_add_sp(&mut self, opcode: u16) -> u32 {
+        let offset = (((opcode & 0x7F) * 4) as i32) as u32;
+        let sign = ((opcode >> 7) & 1) != 0;
+
+        if sign {
+            self.r[13] = self.r[13].wrapping_sub(offset);
+        } else {
+            self.r[13] = self.r[13].wrapping_add(offset);
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        1
+    }
+
+    fn thumb_push_pop(&mut self, opcode: u16, mem: &mut super::Memory, load: bool) -> u32 {
+        let pc_lr = ((opcode >> 8) & 1) != 0;
+        let reg_list = opcode & 0xFF;
+
+        let mut addr = self.r[13];
+
+        if load {
+            // POP (load from stack)
+            for i in 0..8 {
+                if reg_list & (1 << i) != 0 {
+                    self.r[i] = mem.read_word(addr);
+                    addr = addr.wrapping_add(4);
+                }
+            }
+            if pc_lr {
+                self.r[15] = mem.read_word(addr) & !1; // Return to ARM mode if bit 0 is 0
+                addr = addr.wrapping_add(4);
+            }
+            self.r[13] = addr;
+        } else {
+            // PUSH (store to stack)
+            if pc_lr {
+                addr = addr.wrapping_sub(4);
+                mem.write_word(addr, self.r[14]);
+            }
+            for i in (0..8).rev() {
+                if reg_list & (1 << i) != 0 {
+                    addr = addr.wrapping_sub(4);
+                    mem.write_word(addr, self.r[i]);
+                }
+            }
+            self.r[13] = addr;
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        (reg_list.count_ones() + if pc_lr { 1 } else { 0 }) as u32
+    }
+
+    fn thumb_load_store_multiple(&mut self, opcode: u16, mem: &mut super::Memory, load: bool) -> u32 {
+        let rb = ((opcode >> 8) & 0x7) as usize;
+        let reg_list = opcode & 0xFF;
+
+        let mut addr = self.r[rb];
+
+        if load {
+            for i in 0..8 {
+                if reg_list & (1 << i) != 0 {
+                    self.r[i] = mem.read_word(addr);
+                    addr = addr.wrapping_add(4);
+                }
+            }
+            if reg_list & (1 << rb) == 0 {
+                self.r[rb] = addr;
+            }
+        } else {
+            for i in 0..8 {
+                if reg_list & (1 << i) != 0 {
+                    mem.write_word(addr, self.r[i]);
+                    addr = addr.wrapping_add(4);
+                }
+            }
+            if reg_list & (1 << rb) == 0 {
+                self.r[rb] = addr;
+            }
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        (reg_list.count_ones()) as u32
+    }
+
+    fn thumb_branch_cond(&mut self, opcode: u16, instruction_pc: u32) -> u32 {
+        let cond = ((opcode >> 8) & 0xF) as usize;
+        let offset = ((opcode as i8) as i32 * 2) as u32;
+
+        if self.check_condition(cond) {
+            let target = instruction_pc.wrapping_add(offset).wrapping_add(2);
+            self.set_pc(target);
+            return 1;
+        }
+
+        self.r[15] = self.r[15].wrapping_add(2);
+        1
+    }
+
+    fn check_condition(&self, cond: usize) -> bool {
+        match cond {
+            0x0 => self.get_flag_z(),        // EQ
+            0x1 => !self.get_flag_z(),       // NE
+            0x2 => self.get_flag_c(),        // CS
+            0x3 => !self.get_flag_c(),       // CC
+            0x4 => self.get_flag_n(),        // MI
+            0x5 => !self.get_flag_n(),       // PL
+            0x6 => self.get_flag_v(),        // VS
+            0x7 => !self.get_flag_v(),       // VC
+            0x8 => self.get_flag_c() && !self.get_flag_z(),  // HI
+            0x9 => !(self.get_flag_c() && !self.get_flag_z()), // LO
+            0xA => self.get_flag_n() == self.get_flag_v(),    // GE
+            0xB => self.get_flag_n() != self.get_flag_v(),    // LT
+            0xC => !self.get_flag_z() && (self.get_flag_n() == self.get_flag_v()), // GT
+            0xD => self.get_flag_z() || (self.get_flag_n() != self.get_flag_v()), // LE
+            0xE => true,                     // AL
+            _ => false,
+        }
+    }
+
+    fn thumb_software_interrupt(&mut self) -> u32 {
+        // Switch to Supervisor mode and jump to SWI vector
+        let old_cpsr = self.cpsr;
+        self.set_mode(Mode::Supervisor);
+        self.set_spsr(old_cpsr);
+        self.set_lr(self.r[15]);
+        self.r[15] = 0x08;
+        self.set_interrupts_enabled(false);
+        2
+    }
+
+    fn thumb_branch(&mut self, opcode: u16, instruction_pc: u32) -> u32 {
+        let offset = ((opcode as i16) << 5) >> 4; // Sign-extend and multiply by 2
+        let target = instruction_pc.wrapping_add(offset as u32).wrapping_add(2);
+        self.set_pc(target);
+        1
+    }
+
+    fn thumb_bl_prefix(&mut self, opcode: u16, instruction_pc: u32) -> u32 {
+        let offset = ((opcode as i16) << 5) >> 4; // Sign-extend upper 11 bits
+        let target = instruction_pc.wrapping_add((offset as u32) << 11);
+        self.r[14] = target | 1; // Set bit 0 to indicate Thumb
+        self.r[15] = self.r[15].wrapping_add(2);
+        1
+    }
+
+    fn thumb_bl_suffix(&mut self, opcode: u16, _instruction_pc: u32) -> u32 {
+        let offset = ((opcode & 0x7FF) as u32) * 2;
+        let target = (self.r[14] & !1).wrapping_add(offset);
+        self.r[14] = self.r[15].wrapping_sub(2) | 1;
+        self.set_pc(target);
         1
     }
 }

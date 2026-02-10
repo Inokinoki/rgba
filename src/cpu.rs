@@ -377,12 +377,18 @@ impl Cpu {
                 }
             }
             0x2 => {
-                // Load/store register offset / Media instructions
-                self.execute_arm_load_store_register(opcode, mem)
+                // Load/store register offset / Branch
+                // Branch instructions have bits 27-25 = 101
+                if (opcode & 0x0E00_0000) == 0x0A00_0000 {
+                    // Branch (B)
+                    self.execute_arm_branch(opcode, instruction_pc, mem)
+                } else {
+                    self.execute_arm_load_store_register(opcode, mem)
+                }
             }
             0x3 => {
                 // Branch / Branch with link
-                self.execute_arm_branch(opcode, instruction_pc)
+                self.execute_arm_branch(opcode, instruction_pc, mem)
             }
             _ => 1, // Unknown, treat as NOP
         }
@@ -470,30 +476,31 @@ impl Cpu {
                 }
             }
             0x6 => {
-                // SBC
-                let c = if self.get_flag_c() { 1 } else { 0 };
-                let (result1, overflow1) = rn_val.overflowing_sub(op2_val);
-                let (result, overflow2) = result1.overflowing_sub(c - 1);
+                // SBC (Subtract with Carry)
+                // SBC subtracts (op2 + NOT carry) from rn
+                let c = if self.get_flag_c() { 0 } else { 1 }; // NOT carry (borrow)
+                let borrow = op2_val.wrapping_add(c);
+                let (result, overflow) = rn_val.overflowing_sub(borrow);
                 self.r[rd] = result;
                 if s {
                     self.set_flag_n((result as i32) < 0);
                     self.set_flag_z(result == 0);
-                    self.set_flag_c(overflow1 || overflow2);
-                    self.set_flag_v(((rn_val as i32) < (op2_val as i32)) ^
+                    self.set_flag_c(!overflow);
+                    self.set_flag_v(((rn_val as i32) < (borrow as i32)) ^
                                     ((result as i32) < 0));
                 }
             }
             0x7 => {
-                // RSC
-                let c = if self.get_flag_c() { 1 } else { 0 };
-                let (result1, overflow1) = op2_val.overflowing_sub(rn_val);
-                let (result, overflow2) = result1.overflowing_sub(c - 1);
+                // RSC (Reverse Subtract with Carry)
+                let c = if self.get_flag_c() { 0 } else { 1 }; // NOT carry (borrow)
+                let borrow = rn_val.wrapping_add(c);
+                let (result, overflow) = op2_val.overflowing_sub(borrow);
                 self.r[rd] = result;
                 if s {
                     self.set_flag_n((result as i32) < 0);
                     self.set_flag_z(result == 0);
-                    self.set_flag_c(overflow1 || overflow2);
-                    self.set_flag_v(((op2_val as i32) < (rn_val as i32)) ^
+                    self.set_flag_c(!overflow);
+                    self.set_flag_v(((op2_val as i32) < (borrow as i32)) ^
                                     ((result as i32) < 0));
                 }
             }
@@ -777,8 +784,23 @@ impl Cpu {
         2
     }
 
-    fn execute_arm_branch(&mut self, opcode: u32, instruction_pc: u32) -> u32 {
-        let offset = ((opcode as i32) << 8) >> 6; // Sign-extend and multiply by 4
+    fn execute_arm_branch(&mut self, opcode: u32, instruction_pc: u32, mem: &mut super::Memory) -> u32 {
+        // Check for SWI (Software Interrupt)
+        // ARM SWI pattern: bits 27-26 = 0b11, bit 24 = 0, bits 23-8 = 0xFFFF
+        if (opcode & 0x0F00_0000) == 0x0F00_0000 {
+            return self.execute_arm_swi(mem);
+        }
+
+        // Extract and sign-extend the 24-bit offset
+        let offset_imm = (opcode & 0x00FFFFFF) as i32;
+        let offset = if (offset_imm & 0x800000) != 0 {
+            // Negative: sign extend
+            (((offset_imm as u32) | 0xFF000000) as i32) << 2
+        } else {
+            // Positive
+            offset_imm << 2
+        };
+
         let link = ((opcode >> 24) & 1) != 0;
 
         // instruction_pc is the address of the instruction being executed
@@ -789,12 +811,101 @@ impl Cpu {
         }
 
         // Calculate branch target
-        let target = instruction_pc.wrapping_add(offset as u32);
+        let target = instruction_pc.wrapping_add(8).wrapping_add(offset as u32);
 
         // Set PC using set_pc which aligns to word boundary
         self.set_pc(target);
 
         2 // Branch takes 2 cycles
+    }
+
+    fn execute_arm_swi(&mut self, mem: &mut super::Memory) -> u32 {
+        // Extract SWI function number from instruction (bits 23-0 for ARM)
+        // Note: We need to read the instruction that caused this SWI
+        // The instruction is at LR - 4 (since LR was set to next instruction)
+        let swi_insn = mem.read_word(self.r[14] - 4);
+        let swi_func = swi_insn & 0xFFFFFF;
+
+        // For Thumb mode, SWI number is in R7 (but we handle Thumb SWI separately)
+
+        // Handle BIOS function calls
+        match swi_func {
+            0x00 => {
+                // SoftReset - reset the system
+                self.reset();
+                self.r[15] = 0x08000000;
+            }
+            0x01 => {
+                // RegisterRamReset - reset memory regions
+                // Simplified: just return
+                self.r[15] = self.r[14];
+            }
+            0x02 | 0x03 => {
+                // Halt / Stop - not really implementable without interrupts
+                self.r[15] = self.r[14];
+            }
+            0x04 => {
+                // IntrWait - wait for interrupt
+                // For now, just return (won't actually wait)
+                self.r[15] = self.r[14];
+            }
+            0x05 => {
+                // VBlankIntrWait - wait for VBlank interrupt
+                // For now, just return (won't actually wait)
+                self.r[15] = self.r[14];
+            }
+            0x06 => {
+                // Div - division (not implemented in real BIOS)
+                // For now, return R0 / R1 in R0 and R3
+                let r0 = self.r[0];
+                let r1 = self.r[1];
+                if r1 != 0 {
+                    self.r[0] = r0 / r1;
+                    self.r[3] = r0 % r1;
+                } else {
+                    self.r[0] = 0xFFFFFFFF;
+                    self.r[3] = r0;
+                }
+                self.r[15] = self.r[14];
+            }
+            0x08 => {
+                // DivArm - same as Div
+                let r0 = self.r[0];
+                let r1 = self.r[1];
+                if r1 != 0 {
+                    self.r[0] = r0 / r1;
+                    self.r[3] = r0 % r1;
+                } else {
+                    self.r[0] = 0xFFFFFFFF;
+                    self.r[3] = r0;
+                }
+                self.r[15] = self.r[14];
+            }
+            0x0E => {
+                // Sqrt - square root
+                let r0 = self.r[0] as f64;
+                self.r[0] = (r0.sqrt()) as u32;
+                self.r[15] = self.r[14];
+            }
+            _ => {
+                // Unknown SWI - try jumping to BIOS if available
+                if mem.has_bios() {
+                    // Switch to Supervisor mode and jump to SWI vector (0x08)
+                    let old_cpsr = self.cpsr;
+                    self.set_mode(Mode::Supervisor);
+                    self.set_spsr(old_cpsr);
+                    self.set_lr(self.r[15]); // Return address is next instruction
+                    self.r[15] = 0x08; // SWI vector
+                    self.set_interrupts_enabled(false);
+                } else {
+                    // No BIOS - just return
+                    eprintln!("Warning: Unknown SWI 0x{:06X}, returning without action", swi_func);
+                    self.r[15] = self.r[14];
+                }
+            }
+        }
+
+        3 + 3 // SWI takes 3 cycles + 3 for return
     }
 
     fn step_thumb(&mut self, mem: &mut super::Memory) -> u32 {
@@ -918,7 +1029,7 @@ impl Cpu {
                 if (opcode & 0xF800) == 0xE000 {
                     self.thumb_branch_cond(opcode, instruction_pc)
                 } else if (opcode & 0xFF00) == 0xDF00 {
-                    self.thumb_software_interrupt()
+                    self.thumb_software_interrupt(mem)
                 } else {
                     self.thumb_branch(opcode, instruction_pc)
                 }
@@ -1520,15 +1631,83 @@ impl Cpu {
         }
     }
 
-    fn thumb_software_interrupt(&mut self) -> u32 {
-        // Switch to Supervisor mode and jump to SWI vector
-        let old_cpsr = self.cpsr;
-        self.set_mode(Mode::Supervisor);
-        self.set_spsr(old_cpsr);
-        self.set_lr(self.r[15]);
-        self.r[15] = 0x08;
-        self.set_interrupts_enabled(false);
-        2
+    fn thumb_software_interrupt(&mut self, mem: &mut super::Memory) -> u32 {
+        // Thumb SWI: function number is in R7
+        let swi_num = self.r[7];
+
+        // Handle BIOS function calls
+        match swi_num {
+            0x00 => {
+                // SoftReset
+                self.reset();
+                self.r[15] = 0x08000001; // Thumb mode
+            }
+            0x01 => {
+                // RegisterRamReset
+                self.r[15] = self.r[14] | 1; // Return in Thumb mode
+            }
+            0x02 | 0x03 => {
+                // Halt / Stop
+                self.r[15] = self.r[14] | 1;
+            }
+            0x04 => {
+                // IntrWait
+                self.r[15] = self.r[14] | 1;
+            }
+            0x05 => {
+                // VBlankIntrWait
+                self.r[15] = self.r[14] | 1;
+            }
+            0x06 => {
+                // Div
+                let r0 = self.r[0];
+                let r1 = self.r[1];
+                if r1 != 0 {
+                    self.r[0] = r0 / r1;
+                    self.r[3] = r0 % r1;
+                } else {
+                    self.r[0] = 0xFFFFFFFF;
+                    self.r[3] = r0;
+                }
+                self.r[15] = self.r[14] | 1;
+            }
+            0x08 => {
+                // DivArm
+                let r0 = self.r[0];
+                let r1 = self.r[1];
+                if r1 != 0 {
+                    self.r[0] = r0 / r1;
+                    self.r[3] = r0 % r1;
+                } else {
+                    self.r[0] = 0xFFFFFFFF;
+                    self.r[3] = r0;
+                }
+                self.r[15] = self.r[14] | 1;
+            }
+            0x0E => {
+                // Sqrt
+                let r0 = self.r[0] as f64;
+                self.r[0] = (r0.sqrt()) as u32;
+                self.r[15] = self.r[14] | 1;
+            }
+            _ => {
+                // Unknown SWI
+                if mem.has_bios() {
+                    // Switch to Supervisor mode and jump to SWI vector
+                    let old_cpsr = self.cpsr;
+                    self.set_mode(Mode::Supervisor);
+                    self.set_spsr(old_cpsr);
+                    self.set_lr(self.r[15]);
+                    self.r[15] = 0x08;
+                    self.set_interrupts_enabled(false);
+                } else {
+                    eprintln!("Warning: Unknown Thumb SWI 0x{:02X}, returning without action", swi_num);
+                    self.r[15] = self.r[14] | 1;
+                }
+            }
+        }
+
+        2 + 2 // SWI takes 2 cycles + 2 for return
     }
 
     fn thumb_branch(&mut self, opcode: u16, instruction_pc: u32) -> u32 {

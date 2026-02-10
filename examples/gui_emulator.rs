@@ -9,19 +9,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
-    let rom_path = if args.len() > 1 {
-        Some(&args[1])
+
+    let (rom_path, bios_path) = if args.len() > 1 {
+        let mut rom_idx = 1;
+        let mut bios_idx = None;
+
+        // Check for --bios argument
+        for (i, arg) in args.iter().enumerate() {
+            if arg == "--bios" && i + 1 < args.len() {
+                bios_idx = Some(i + 1);
+                if rom_idx == i || rom_idx == i + 1 {
+                    rom_idx = i + 2;
+                }
+                break;
+            }
+        }
+
+        let bios_path = bios_idx.map(|idx| args[idx].as_str());
+        let rom_path = if rom_idx < args.len() { Some(args[rom_idx].as_str()) } else { None };
+
+        (rom_path, bios_path)
     } else {
+        (None, None)
+    };
+
+    if rom_path.is_none() {
         println!("RGBA GBA Emulator");
-        println!("Usage: {} <rom_file>", args[0]);
+        println!("Usage: {} [--bios bios.bin] <rom_file>", args[0]);
+        println!();
+        println!("Options:");
+        println!("  --bios <file>  Load GBA BIOS file (recommended)");
         println!();
         println!("Starting without ROM - showing test pattern...");
         println!();
-        None
-    };
+    }
 
     // Create GBA emulator
     let mut gba = rgba::Gba::new();
+
+    // Load BIOS if provided
+    if let Some(path) = bios_path {
+        match gba.load_bios_path(path) {
+            Ok(_) => println!("Loaded BIOS: {}", path),
+            Err(e) => {
+                eprintln!("Failed to load BIOS: {}", e);
+                eprintln!("Continuing without BIOS (some ROMs may not work)...");
+            }
+        }
+    } else {
+        // Check for default BIOS locations
+        let default_bios_paths = [
+            "bios.bin",
+            "gba_bios.bin",
+            "gba.bios",
+            "~/.local/share/gba/bios.bin",
+        ];
+
+        for bios_path in &default_bios_paths {
+            if let Ok(_) = gba.load_bios_path(bios_path) {
+                println!("Auto-loaded BIOS from: {}", bios_path);
+                break;
+            }
+        }
+    }
 
     // Load ROM if provided
     if let Some(path) = rom_path {

@@ -76,6 +76,20 @@ impl Memory {
         self.rom = data;
     }
 
+    /// Load BIOS from a file
+    pub fn load_bios(&mut self, data: Vec<u8>) {
+        // BIOS is 16KB, truncate or pad as needed
+        let mut bios_data = vec![0u8; 0x4000];
+        let len = data.len().min(0x4000);
+        bios_data[..len].copy_from_slice(&data[..len]);
+        self.bios = bios_data;
+    }
+
+    /// Check if BIOS is loaded (not all zeros)
+    pub fn has_bios(&self) -> bool {
+        self.bios.iter().any(|&b| b != 0)
+    }
+
     /// Get access cycles for a memory region
     pub fn get_access_cycles(&self, addr: u32, _sequential: bool) -> u32 {
         match addr {

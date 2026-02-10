@@ -104,6 +104,18 @@ impl Gba {
         Ok(())
     }
 
+    /// Load BIOS from a file path
+    pub fn load_bios_path(&mut self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use std::fs;
+        use std::io::Read;
+
+        let mut file = fs::File::open(path)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+        self.mem.load_bios(data);
+        Ok(())
+    }
+
     /// Get a reference to the PPU
     pub fn ppu(&self) -> &Ppu {
         &self.ppu
@@ -171,6 +183,31 @@ impl Gba {
     /// Get a reference to the memory system (for palette access)
     pub fn mem(&self) -> &Memory {
         &self.mem
+    }
+
+    /// Get a mutable reference to the memory system
+    pub fn mem_mut(&mut self) -> &mut Memory {
+        &mut self.mem
+    }
+
+    /// Write a byte to memory (for testing/debugging)
+    pub fn write_byte(&mut self, addr: u32, val: u8) {
+        self.mem.write_byte(addr, val);
+    }
+
+    /// Write a halfword (16-bit) to memory
+    pub fn write_half(&mut self, addr: u32, val: u16) {
+        self.mem.write_half(addr, val);
+    }
+
+    /// Write a word (32-bit) to memory
+    pub fn write_word(&mut self, addr: u32, val: u32) {
+        self.mem.write_word(addr, val);
+    }
+
+    /// Read a byte from memory
+    pub fn read_byte(&self, addr: u32) -> u8 {
+        self.mem.read_byte(addr)
     }
 
     /// Read palette color (RGB555) from palette RAM

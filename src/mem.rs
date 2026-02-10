@@ -293,6 +293,16 @@ impl Memory {
             0
         }
     }
+
+    /// Get a reference to VRAM data
+    pub fn vram(&self) -> &[u8] {
+        &self.vram[..]
+    }
+
+    /// Get a reference to IO register data
+    pub fn io(&self) -> &[u8] {
+        &self.io[..]
+    }
 }
 
 impl Default for Memory {

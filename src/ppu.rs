@@ -135,6 +135,18 @@ impl Ppu {
         self.sprites = [(0, 0, 0, 0, false); 128];
     }
 
+    /// Sync VRAM data from Memory system
+    /// This must be called before rendering to get the latest VRAM state
+    pub fn sync_vram(&mut self, vram_data: &[u8]) {
+        let len = self.vram.len().min(vram_data.len());
+        self.vram[..len].copy_from_slice(&vram_data[..len]);
+    }
+
+    /// Get a reference to VRAM (for reading by GUI)
+    pub fn vram(&self) -> &[u8] {
+        &self.vram[..]
+    }
+
     // Display control
     pub fn is_display_enabled(&self) -> bool {
         self.display_enabled
@@ -503,6 +515,16 @@ impl Ppu {
 
     pub fn set_blend_evb(&mut self, val: u16) {
         self.bldalpha = (self.bldalpha & !0x1F00) | ((val.min(16) & 0x1F) << 8);
+    }
+
+    /// Set the blend control register (BLDCNT)
+    pub fn set_blend_control(&mut self, val: u16) {
+        self.bldcnt = val;
+    }
+
+    /// Set the blend alpha register (BLDALPHA)
+    pub fn set_blend_alpha(&mut self, val: u16) {
+        self.bldalpha = val;
     }
 
     // Mode 3: 16-bit bitmap (240x160)

@@ -109,6 +109,55 @@ impl Gba {
         &self.ppu
     }
 
+    /// Get a mutable reference to the PPU
+    pub fn ppu_mut(&mut self) -> &mut Ppu {
+        &mut self.ppu
+    }
+
+    /// Sync PPU state from Memory (IO registers and VRAM)
+    /// This must be called before rendering to get the latest state
+    pub fn sync_ppu(&mut self) {
+        // Sync VRAM
+        self.ppu.sync_vram(self.mem.vram());
+
+        // Sync IO registers
+        let io = self.mem.io();
+
+        // DISPCNT (0x0400_0000)
+        let dispcnt = u16::from_le_bytes([io[0], io[1]]);
+        self.ppu.set_display_enabled((dispcnt & 0x80) != 0);
+        self.ppu.set_display_mode((dispcnt & 0x7) as u8);
+
+        // BG0CNT - BG3CNT (0x0400_0008 - 0x0400_000E)
+        for bg in 0..4 {
+            let offset = 8 + (bg * 2);
+            let bgcnt = u16::from_le_bytes([io[offset], io[offset + 1]]);
+            self.ppu.set_bgcnt(bg, bgcnt);
+
+            // Enable/disable BG based on DISPCNT bits 8-11
+            let bg_enabled = (dispcnt & (0x100 << bg)) != 0;
+            self.ppu.set_bg_enabled(bg, bg_enabled);
+        }
+
+        // BG0HOFS - BG3VOFS (0x0400_0010 - 0x0400_002D)
+        for bg in 0..4 {
+            let hofs_offset = 16 + (bg * 4);
+            let vofs_offset = hofs_offset + 2;
+            let hofs = u16::from_le_bytes([io[hofs_offset], io[hofs_offset + 1]]) & 0x1FF;
+            let vofs = u16::from_le_bytes([io[vofs_offset], io[vofs_offset + 1]]) & 0x1FF;
+            self.ppu.set_bg_hofs(bg, hofs);
+            self.ppu.set_bg_vofs(bg, vofs);
+        }
+
+        // BLDCNT (0x0400_0050)
+        let bldcnt = u16::from_le_bytes([io[0x50], io[0x51]]);
+        self.ppu.set_blend_control(bldcnt);
+
+        // BLDALPHA (0x0400_0052)
+        let bldalpha = u16::from_le_bytes([io[0x52], io[0x53]]);
+        self.ppu.set_blend_alpha(bldalpha);
+    }
+
     /// Get a mutable reference to the input system
     pub fn input_mut(&mut self) -> &mut Input {
         &mut self.input

@@ -147,6 +147,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Sync PPU state from Memory before rendering
+        gba.sync_ppu();
+
         // Render the screen
         let ppu = gba.ppu();
         let mode = ppu.get_display_mode();

@@ -13,6 +13,155 @@
 //! - 0x0700_0000 - 0x0700_03FF: OAM (1KB)
 //! - 0x0800_0000 - 0x0DFF_FFFF: ROM (max 32MB)
 
+use bitflags::bitflags;
+
+bitflags! {
+    /// Interrupt flags
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Interrupt: u16 {
+        const VBLANK   = 0x0001;
+        const HBLANK   = 0x0002;
+        const VCOUNT   = 0x0004;
+        const TIMER0   = 0x0008;
+        const TIMER1   = 0x0010;
+        const TIMER2   = 0x0020;
+        const TIMER3   = 0x0040;
+        const SERIAL   = 0x0080;
+        const DMA0     = 0x0100;
+        const DMA1     = 0x0200;
+        const DMA2     = 0x0400;
+        const DMA3     = 0x0800;
+        const KEYPAD   = 0x1000;
+        const GAMEPAK  = 0x2000;
+    }
+}
+
+/// GBA Interrupt Controller (embedded in Memory for IO register handling)
+pub struct InterruptController {
+    /// Interrupt Enable register (0x0400_0200)
+    pub ie: Interrupt,
+
+    /// Interrupt Enable/FIRQ select (0x0400_0208)
+    pub ie_fp: Interrupt,
+
+    /// Interrupt Request flags (0x0400_0202)
+    pub if_raw: Interrupt,
+
+    /// Interrupt flags with masked disabled interrupts cleared
+    if_processed: Interrupt,
+
+    /// Interrupt Master Enable (0x0400_0208)
+    pub ime: bool,
+
+    /// Whether we're currently in an interrupt handler
+    in_interrupt: bool,
+}
+
+impl InterruptController {
+    pub fn new() -> Self {
+        Self {
+            ie: Interrupt::empty(),
+            ie_fp: Interrupt::empty(),
+            if_raw: Interrupt::empty(),
+            if_processed: Interrupt::empty(),
+            ime: false,
+            in_interrupt: false,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.ie = Interrupt::empty();
+        self.ie_fp = Interrupt::empty();
+        self.if_raw = Interrupt::empty();
+        self.if_processed = Interrupt::empty();
+        self.ime = false;
+        self.in_interrupt = false;
+    }
+
+    /// Request an interrupt
+    pub fn request(&mut self, interrupt: Interrupt) {
+        self.if_raw |= interrupt;
+    }
+
+    /// Get pending interrupt (considering IE and IME)
+    pub fn get_pending(&self) -> Option<Interrupt> {
+        if !self.ime {
+            return None;
+        }
+
+        // Get enabled interrupts that have requested
+        let pending = self.ie & self.if_raw;
+
+        if pending.is_empty() {
+            None
+        } else {
+            // Return the highest priority interrupt (lowest bit number)
+            let bit = pending.bits().trailing_zeros() as u16;
+            Some(Interrupt::from_bits_truncate(1 << bit))
+        }
+    }
+
+    /// Acknowledge an interrupt (clears IF bit)
+    pub fn acknowledge(&mut self, interrupt: Interrupt) {
+        self.if_raw &= !interrupt;
+        self.if_processed &= !interrupt;
+    }
+
+    /// Check if we should take an interrupt
+    pub fn should_take_interrupt(&self) -> bool {
+        if !self.ime || self.in_interrupt {
+            return false;
+        }
+
+        // Check if any enabled interrupt is pending
+        !(self.ie & self.if_raw).is_empty()
+    }
+
+    /// Enter interrupt handler
+    pub fn enter_interrupt(&mut self) {
+        self.in_interrupt = true;
+        self.ime = false; // IME is cleared on interrupt entry
+    }
+
+    /// Exit interrupt handler
+    pub fn exit_interrupt(&mut self) {
+        self.in_interrupt = false;
+        self.ime = true; // IME is restored on interrupt exit
+    }
+
+    /// Read IO register
+    pub fn read_register(&self, offset: usize) -> u16 {
+        match offset {
+            0x000 => self.ie.bits(),
+            0x002 => self.if_raw.bits(),
+            0x200 => self.ie_fp.bits(),
+            0x208 => self.ime as u16,
+            _ => 0,
+        }
+    }
+
+    /// Write IO register
+    pub fn write_register(&mut self, offset: usize, val: u16) {
+        match offset {
+            0x000 => self.ie = Interrupt::from_bits_truncate(val),
+            0x002 => {
+                // IF - writing 1 clears the bit, writing 0 has no effect
+                self.if_raw &= !(Interrupt::from_bits_truncate(val));
+                self.if_processed &= !(Interrupt::from_bits_truncate(val));
+            }
+            0x200 => self.ie_fp = Interrupt::from_bits_truncate(val),
+            0x208 => self.ime = val != 0,
+            _ => {}
+        }
+    }
+}
+
+impl Default for InterruptController {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// GBA Memory System
 pub struct Memory {
     // BIOS ROM (16KB) - read-only after boot
@@ -41,6 +190,9 @@ pub struct Memory {
 
     // Waitstate configuration
     waitcnt: u16,
+
+    // Interrupt controller
+    pub interrupt: InterruptController,
 }
 
 impl Memory {
@@ -59,6 +211,7 @@ impl Memory {
             oam: Box::new([0u8; 0x400]),
             rom: Vec::new(),
             waitcnt: 0x0000,
+            interrupt: InterruptController::new(),
         }
     }
 
@@ -70,6 +223,7 @@ impl Memory {
         self.vram.fill(0);
         self.oam.fill(0);
         self.waitcnt = 0x0000;
+        self.interrupt.reset();
     }
 
     pub fn load_rom(&mut self, data: Vec<u8>) {
@@ -154,7 +308,7 @@ impl Memory {
     }
 
     /// Read a byte from memory
-    pub fn read_byte(&self, addr: u32) -> u8 {
+    pub fn read_byte(&mut self, addr: u32) -> u8 {
         let (region, offset) = self.map_address(addr);
 
         match region {
@@ -198,7 +352,7 @@ impl Memory {
     }
 
     /// Read a halfword (16-bit) from memory
-    pub fn read_half(&self, addr: u32) -> u16 {
+    pub fn read_half(&mut self, addr: u32) -> u16 {
         if addr & 1 != 0 {
             // Unaligned read - rotate
             let (region, offset) = self.map_address(addr & !1);
@@ -228,7 +382,7 @@ impl Memory {
     }
 
     /// Read a word (32-bit) from memory
-    pub fn read_word(&self, addr: u32) -> u32 {
+    pub fn read_word(&mut self, addr: u32) -> u32 {
         if addr & 3 != 0 {
             // Unaligned read - rotate
             let aligned = addr & !3;
@@ -254,8 +408,25 @@ impl Memory {
     }
 
     /// Read from IO register
-    fn read_io(&self, addr: u32) -> u8 {
+    fn read_io(&mut self, addr: u32) -> u8 {
         let offset = (addr - 0x0400_0000) as usize;
+
+        // Handle interrupt registers
+        let (int_offset, byte_index) = match addr {
+            0x0400_0000 | 0x0400_0001 => (Some(0x000), (addr & 1) as usize), // IE
+            0x0400_0002 | 0x0400_0003 => (Some(0x002), (addr & 1) as usize), // IF
+            0x0400_0208 => (Some(0x208), 0), // IME
+            _ => (None, 0),
+        };
+
+        if let Some(ioff) = int_offset {
+            let val = self.interrupt.read_register(ioff);
+            return if ioff == 0x208 {
+                val as u8
+            } else {
+                (val >> (8 * byte_index as u32)) as u8
+            };
+        }
 
         match offset {
             0x000 => self.io[offset] | 0x80, // DISPCNT - bit 7 is always set
@@ -270,6 +441,29 @@ impl Memory {
     /// Write to IO register
     fn write_io(&mut self, addr: u32, val: u8) {
         let offset = (addr - 0x0400_0000) as usize;
+
+        // Handle interrupt registers
+        let (int_offset, byte_index) = match addr {
+            0x0400_0000 | 0x0400_0001 => (Some(0x000), (addr & 1) as usize), // IE
+            0x0400_0002 | 0x0400_0003 => (Some(0x002), (addr & 1) as usize), // IF
+            0x0400_0208 => (Some(0x208), 0), // IME
+            _ => (None, 0),
+        };
+
+        if let Some(ioff) = int_offset {
+            // Read current value, modify the byte, write back
+            let current = self.interrupt.read_register(ioff);
+            let new_val = if ioff == 0x208 {
+                val as u16
+            } else {
+                let shift = 8 * byte_index as u32;
+                let mask = 0xFF << shift;
+                let current_cleared = current & !mask;
+                current_cleared | ((val as u16) << shift)
+            };
+            self.interrupt.write_register(ioff, new_val);
+            return;
+        }
 
         match offset {
             0x204 => {
@@ -316,6 +510,26 @@ impl Memory {
     /// Get a reference to IO register data
     pub fn io(&self) -> &[u8] {
         &self.io[..]
+    }
+
+    /// Get a mutable reference to IO register data
+    pub fn io_mut(&mut self) -> &mut [u8] {
+        &mut self.io[..]
+    }
+
+    /// Check if address is in interrupt register range (0x0400_0000 - 0x0400_0208)
+    pub fn is_interrupt_register(addr: u32) -> bool {
+        matches!(addr, 0x0400_0000..=0x0400_0208)
+    }
+
+    /// Get interrupt register offset (returns 0xFFFF if not in range)
+    pub fn get_interrupt_register_offset(addr: u32) -> Option<usize> {
+        match addr {
+            0x0400_0000 | 0x0400_0001 => Some(0x000), // IE
+            0x0400_0002 | 0x0400_0003 => Some(0x002), // IF
+            0x0400_0208 => Some(0x208), // IME
+            _ => None,
+        }
     }
 }
 

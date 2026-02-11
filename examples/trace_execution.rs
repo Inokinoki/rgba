@@ -35,9 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Read first instruction
     let pc = cpu.get_pc();
-    let mem = gba.mem();
-    let first_word = mem.read_word(pc);
-    let first_half = mem.read_half(pc);
+    let first_word = gba.mem_mut().read_word(pc);
+    let first_half = gba.mem_mut().read_half(pc);
     println!("\nFirst instruction at 0x{:08X}:", pc);
     println!("  Word: 0x{:08X}", first_word);
     println!("  Half: 0x{:04X}", first_half);
@@ -49,11 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let thumb = gba.cpu().is_thumb_mode();
 
         // Fetch instruction
-        let mem = gba.mem();
         let insn = if thumb {
-            mem.read_half(pc_before) as u32
+            gba.mem_mut().read_half(pc_before) as u32
         } else {
-            mem.read_word(pc_before)
+            gba.mem_mut().read_word(pc_before)
         };
 
         // Execute
@@ -104,7 +102,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n=== IO Register State ===");
-    let dispcnt = gba.mem().read_half(0x0400_0000);
+    let dispcnt = gba.mem_mut().read_half(0x0400_0000);
     println!("DISPCNT: 0x{:04X}", dispcnt);
     println!("  Mode: {}", dispcnt & 0x7);
     println!("  Display Enable: {}", (dispcnt & 0x80) != 0);

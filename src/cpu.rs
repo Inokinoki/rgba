@@ -105,13 +105,36 @@ impl Cpu {
         self.banked_sp = [0; 6];
         self.banked_lr = [0; 6];
         self.banked_spsr = [0; 6];
-        self.cpsr = 0x0000005F; // System mode, IRQ/FIQ enabled, ARM mode
+        self.cpsr = 0x000000DF; // System mode, IRQ/FIQ disabled, ARM mode
         self.r[13] = 0x0300_7F00; // SP (stack pointer) - points to IWRAM
         self.r[14] = 0x0800_0000; // LR (link register) - points to ROM entry
         self.r[15] = 0x0800_0000; // PC (program counter) - ROM entry point
         self.pipeline = [0; 3];
         self.pipeline_pc = [0; 3];
         self.pipeline_loaded = false;
+    }
+
+    /// Take an interrupt - switch to IRQ mode and jump to IRQ vector
+    pub fn take_interrupt(&mut self, mem: &mut super::Memory) {
+        // Save return address and CPSR
+        let old_cpsr = self.cpsr;
+        let ret_addr = self.get_pc();
+
+        // Switch to IRQ mode (0b10010 = 18)
+        self.set_mode(Mode::Irq);
+
+        // Save return address in LR (adjusted for pipeline)
+        self.set_lr(ret_addr.wrapping_sub(4));
+
+        // Save old CPSR to SPSR_irq
+        self.banked_spsr[2] = old_cpsr; // IRQ mode is bank index 2
+
+        // Disable IRQ (set CPSR bit 7)
+        self.cpsr |= 0x80;
+
+        // Jump to IRQ vector at 0x00000018
+        self.set_pc(0x00000018);
+        self.pipeline_loaded = false; // Refill pipeline
     }
 
     // Register access
@@ -310,6 +333,7 @@ impl Cpu {
         if !self.pipeline_loaded {
             self.pipeline_pc[0] = self.r[15];
             self.pipeline[0] = mem.read_word(self.r[15]);
+            // Advance PC AFTER loading pipeline
             self.r[15] = self.r[15].wrapping_add(4);
 
             self.pipeline_pc[1] = self.r[15];
@@ -401,6 +425,15 @@ impl Cpu {
         let rn = ((opcode >> 16) & 0xF) as usize;
         let rd = ((opcode >> 12) & 0xF) as usize;
         let operand2 = opcode & 0xFFF;
+
+        // Debug: print detailed state for EORS instruction
+        if op == 0x1 && rd == 5 && s {
+            eprintln!("  [DEBUG] EORS at PC=0x{:08X}", self.r[15]);
+            eprintln!("           R5=0x{:08X} R3=0x{:08X} R12=0x{:08X} R6=0x{:08X}",
+                        self.r[5], self.r[3], self.r[12], self.r[6]);
+            eprintln!("           CPSR=0x{:08X} Thumb={}",
+                        self.cpsr, self.is_thumb_mode());
+        }
 
         // Get operands
         let rn_val = self.r[rn];
@@ -1035,11 +1068,22 @@ impl Cpu {
                 }
             }
             0b111 => {
-                // Category 7: Long branch with link
-                if (opcode & 0xF800) == 0xF000 {
-                    self.thumb_bl_prefix(opcode, instruction_pc)
+                // Category 7: Long branch with link (BL/BLX)
+                // Format: 11110xxxxxxxxxxx (prefix) or 11111xxxxxxxxxxx (suffix)
+                // Check top 5 bits for proper BL/BLX format
+                let top5 = (opcode >> 11) & 0x1F;
+                if top5 == 0b11110 || top5 == 0b11111 {
+                    // BL/BLX prefix or suffix
+                    if (opcode & 0xF800) == 0xF000 {
+                        // BL prefix: 11110Sxxxxxxxxxxx
+                        self.thumb_bl_prefix(opcode, instruction_pc)
+                    } else {
+                        // BL/BLX suffix: 11H1Sxxxxxxxxxxx
+                        self.thumb_bl_suffix(opcode, instruction_pc)
+                    }
                 } else {
-                    self.thumb_bl_suffix(opcode, instruction_pc)
+                    // Undefined - treat as NOP
+                    1
                 }
             }
             _ => 1
@@ -1718,18 +1762,62 @@ impl Cpu {
     }
 
     fn thumb_bl_prefix(&mut self, opcode: u16, instruction_pc: u32) -> u32 {
-        let offset = ((opcode as i16) << 5) >> 4; // Sign-extend upper 11 bits
-        let target = instruction_pc.wrapping_add((offset as u32) << 11);
-        self.r[14] = target | 1; // Set bit 0 to indicate Thumb
+        // BL/BLX prefix: 11110Sxxxxxxxxxxx
+        // S: sign bit of offset
+        // imm10: bits 0-9 of offset (to be shifted left by 12)
+        let s_bit = (opcode >> 10) & 1;
+        let imm10 = (opcode & 0x3FF) as u32;
+
+        // Store partial offset in LR (high 11 bits + sign bit)
+        // Format: sign_bit (bit 22) | imm10 (bits 12-21, shifted by 12 in final calculation)
+        // We store it as: (sign_bit << 23) | (imm10 << 12)
+        // But we need to be careful about sign extension
+        let offset_high = ((s_bit as i32) << 23) | ((imm10 as i32) << 12);
+        self.r[14] = offset_high as u32;
+
+        // Advance to next instruction
         self.r[15] = self.r[15].wrapping_add(2);
         1
     }
 
     fn thumb_bl_suffix(&mut self, opcode: u16, _instruction_pc: u32) -> u32 {
-        let offset = ((opcode & 0x7FF) as u32) * 2;
-        let target = (self.r[14] & !1).wrapping_add(offset);
-        self.r[14] = self.r[15].wrapping_sub(2) | 1;
-        self.set_pc(target);
+        // BL/BLX suffix: 11H1Sxxxxxxxxxxx
+        // H: determines if BL or BLX (1 = BLX, 0 = BL)
+        // S: additional sign bit
+        // imm11: bits 0-10 of offset (to be shifted left by 1)
+
+        let h_bit = (opcode >> 12) & 1;
+        let s_bit2 = (opcode >> 11) & 1;
+        let imm11 = (opcode & 0x7FF) as u32;
+
+        // Get the high offset from LR (stored by prefix)
+        let offset_high = self.r[14] as i32;
+
+        // Calculate full offset
+        // offset = (imm11 << 1) | (offset_high) | (s_bit2 << 22)
+        // The offset_high already has the sign bit at bit 23 and imm10 at bits 12-21
+        let offset_low = ((imm11 as i32) << 1) | ((s_bit2 as i32) << 22);
+        let mut offset = offset_high.wrapping_add(offset_low);
+
+        // Sign extend from 24 bits to 32 bits
+        if (offset & 0x800000) != 0 {
+            offset = offset | (-0x800000_i32);
+        }
+
+        // Save return address (PC of the next instruction after the suffix)
+        self.r[14] = self.r[15].wrapping_add(2) | 1; // Return to Thumb mode
+
+        // Calculate target
+        let target = self.r[15].wrapping_add(2).wrapping_add(offset as u32);
+
+        if h_bit == 1 {
+            // BLX: switch to ARM mode (clear bit 0), target is word-aligned
+            self.set_thumb_mode(false);
+            self.set_pc(target & 0xFFFFFFFC); // Clear bit 0 for word alignment
+        } else {
+            // BL: stay in Thumb mode (set bit 0)
+            self.set_pc(target | 1);
+        }
         1
     }
 }

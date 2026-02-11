@@ -7,7 +7,7 @@ mod dma;
 mod input;
 
 pub use cpu::Cpu;
-pub use mem::Memory;
+pub use mem::{Memory, Interrupt, InterruptController};
 pub use ppu::Ppu;
 pub use apu::Apu;
 pub use timer::Timer;
@@ -79,8 +79,26 @@ impl Gba {
 
     /// Executes a single step
     pub fn step(&mut self) {
+        // Sync PPU state to Memory before CPU reads (for DISPSTAT, VCOUNT)
+        self.sync_ppu_to_mem();
+
+        // Check if we should take an interrupt before executing instruction
+        if self.mem.interrupt.should_take_interrupt() {
+            if let Some(interrupt) = self.mem.interrupt.get_pending() {
+                self.cpu.take_interrupt(&mut self.mem);
+                self.mem.interrupt.enter_interrupt();
+                self.mem.interrupt.acknowledge(interrupt);
+            }
+        }
+
         let cycles = self.cpu.step(&mut self.mem);
-        self.ppu.step(cycles);
+
+        // Step PPU and check for VBlank interrupt
+        let vblank_start = self.ppu.step_vblank_check(cycles);
+        if vblank_start {
+            self.mem.interrupt.request(Interrupt::VBLANK);
+        }
+
         self.apu.step(cycles);
         for timer in &mut self.timers {
             timer.step(cycles);
@@ -139,6 +157,37 @@ impl Gba {
         let dispcnt = u16::from_le_bytes([io[0], io[1]]);
         self.ppu.set_display_enabled((dispcnt & 0x80) != 0);
         self.ppu.set_display_mode((dispcnt & 0x7) as u8);
+    }
+
+    /// Sync PPU state TO Memory (DISPSTAT, VCOUNT)
+    /// This must be called before memory reads to get accurate IO register values
+    pub fn sync_ppu_to_mem(&mut self) {
+        let io = self.mem.io_mut();
+
+        // DISPSTAT (0x0400_0004) - get current value from PPU
+        let dispstat = self.ppu.get_dispstat();
+        io[0x04] = (dispstat & 0xFF) as u8;
+        io[0x05] = ((dispstat >> 8) & 0xFF) as u8;
+
+        // VCOUNT (0x0400_0006) - current scanline
+        let vcount = self.ppu.get_vcount();
+        io[0x06] = (vcount & 0xFF) as u8;
+        io[0x07] = ((vcount >> 8) & 0xFF) as u8;
+    }
+
+    /// Sync PPU state from Memory (full)
+    /// This must be called before rendering to get the latest state
+    pub fn sync_ppu_full(&mut self) {
+        // First sync from VRAM
+        self.ppu.sync_vram(self.mem.vram());
+
+        // Sync IO registers
+        let io = self.mem.io();
+
+        // DISPCNT (0x0400_0000)
+        let dispcnt = u16::from_le_bytes([io[0], io[1]]);
+        self.ppu.set_display_enabled((dispcnt & 0x80) != 0);
+        self.ppu.set_display_mode((dispcnt & 0x7) as u8);
 
         // BG0CNT - BG3CNT (0x0400_0008 - 0x0400_000E)
         for bg in 0..4 {
@@ -180,9 +229,19 @@ impl Gba {
         &self.cpu
     }
 
+    /// Get CPU PC value
+    pub fn cpu_pc(&self) -> u32 {
+        self.cpu.get_pc()
+    }
+
     /// Get a reference to the memory system (for palette access)
     pub fn mem(&self) -> &Memory {
         &self.mem
+    }
+
+    /// Read a word from memory (for testing)
+    pub fn mem_read_word(&mut self, addr: u32) -> u32 {
+        self.mem.read_word(addr)
     }
 
     /// Get a mutable reference to the memory system
@@ -206,7 +265,7 @@ impl Gba {
     }
 
     /// Read a byte from memory
-    pub fn read_byte(&self, addr: u32) -> u8 {
+    pub fn read_byte(&mut self, addr: u32) -> u8 {
         self.mem.read_byte(addr)
     }
 

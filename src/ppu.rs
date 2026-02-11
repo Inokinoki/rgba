@@ -201,6 +201,32 @@ impl Ppu {
         self.hcounter >= 960 // Visible pixels: 240 * 4 = 960 cycles
     }
 
+    // Display status (DISPSTAT)
+    pub fn get_dispstat(&self) -> u16 {
+        let mut stat = self.dispstat;
+        // Bit 0: VBlank flag (set when in VBlank)
+        if self.is_in_vblank() {
+            stat |= 0x0001;
+        } else {
+            stat &= !0x0001;
+        }
+        // Bit 1: HBlank flag (set when in HBlank)
+        if self.is_in_hblank() {
+            stat |= 0x0002;
+        } else {
+            stat &= !0x0002;
+        }
+        // Bit 2: VCount match flag (not implemented for now)
+        stat
+    }
+
+    pub fn set_dispstat(&mut self, val: u16) {
+        // Only bits 8-15 are writable (VCount setting)
+        // Bits 0-2 are status flags, read-only
+        // Bits 3-7 are interrupt enables, writable
+        self.dispstat = val;
+    }
+
     // Background control
     pub fn is_bg_enabled(&self, bg: usize) -> bool {
         if bg > 3 {
@@ -758,9 +784,24 @@ impl Ppu {
 
     /// Step the PPU forward by given number of cycles
     pub fn step(&mut self, cycles: u32) {
-        if !self.display_enabled {
-            return;
+        self.hcounter += cycles;
+
+        // Check for HBlank
+        if self.hcounter >= 1232 {
+            self.hcounter -= 1232;
+            self.vcount += 1;
+
+            // Check for VBlank
+            if self.vcount >= 228 {
+                self.vcount = 0;
+            }
         }
+    }
+
+    /// Step the PPU and return true if VBlank just started
+    /// VBlank starts at scanline 160 (when vcount transitions from 159 to 160)
+    pub fn step_vblank_check(&mut self, cycles: u32) -> bool {
+        let old_vcount = self.vcount;
 
         self.hcounter += cycles;
 
@@ -774,6 +815,9 @@ impl Ppu {
                 self.vcount = 0;
             }
         }
+
+        // VBlank starts when we transition from scanline 159 to 160
+        old_vcount == 159 && self.vcount == 160
     }
 }
 

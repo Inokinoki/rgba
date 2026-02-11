@@ -401,12 +401,18 @@ impl Cpu {
                 }
             }
             0x2 => {
-                // Load/store register offset / Branch
-                // Branch instructions have bits 27-25 = 101
-                if (opcode & 0x0E00_0000) == 0x0A00_0000 {
+                // Load/store register offset / LDM / STM / Branch
+                // Check bits 27-25 to distinguish sub-types
+                let bits_27_25 = (opcode >> 25) & 0x7;
+
+                if bits_27_25 == 0b100 || bits_27_25 == 0b101 {
+                    // LDM (Load Multiple) or STM (Store Multiple)
+                    self.execute_arm_block_data_transfer(opcode, mem)
+                } else if (opcode & 0x0E00_0000) == 0x0A00_0000 {
                     // Branch (B)
                     self.execute_arm_branch(opcode, instruction_pc, mem)
                 } else {
+                    // Load/store with register offset
                     self.execute_arm_load_store_register(opcode, mem)
                 }
             }
@@ -815,6 +821,75 @@ impl Cpu {
 
         self.r[15] = self.r[15].wrapping_add(4);
         2
+    }
+
+    fn execute_arm_block_data_transfer(&mut self, opcode: u32, mem: &mut super::Memory) -> u32 {
+        // LDM (Load Multiple) or STM (Store Multiple)
+        // Format: PUWL (bits 24-21) + Rn (bits 19-16) + register list (bits 15-0)
+
+        let pre_index = ((opcode >> 24) & 1) != 0;  // P bit
+        let add_to_base = ((opcode >> 23) & 1) != 0;  // U bit (1=add, 0=subtract)
+        let writeback = ((opcode >> 21) & 1) != 0;  // W bit
+        let load = ((opcode >> 20) & 1) != 0;  // L bit (1=load/LDM, 0=store/STM)
+        let rn = ((opcode >> 16) & 0xF) as usize;  // Base register
+        let reg_list = opcode & 0xFFFF;  // Bitmask of registers
+
+        // Calculate start address
+        let mut addr = self.r[rn];
+        if !add_to_base {
+            // Decrement mode: subtract register count * 4 first
+            let reg_count = reg_list.count_ones() as u32;
+            addr = addr.wrapping_sub(reg_count * 4);
+        }
+        if !pre_index && writeback {
+            // Writeback for decrement mode uses decremented address
+            self.r[rn] = addr;
+        }
+
+        // Process each register
+        for reg_idx in 0..16 {
+            if reg_list & (1 << reg_idx) != 0 {
+                if load {
+                    // LDM: load from memory into register
+                    self.r[reg_idx] = mem.read_word(addr);
+                } else {
+                    // STM: store register to memory
+                    mem.write_word(addr, self.r[reg_idx]);
+                }
+                addr = addr.wrapping_add(4);
+            }
+        }
+
+        // Handle writeback for increment mode
+        if add_to_base && writeback {
+            if !pre_index {
+                // Post-index: update base to final address
+                self.r[rn] = addr;
+            } else {
+                // Pre-index: update base to start + offset
+                let reg_count = reg_list.count_ones() as u32;
+                self.r[rn] = self.r[rn].wrapping_add(reg_count * 4);
+            }
+        }
+
+        // Handle PC (R15) loading in LDM
+        if load && (reg_list & (1 << 15)) != 0 {
+            // When PC is loaded from LDM, switch mode based on bit 0
+            let pc_value = self.r[15];
+            if pc_value & 1 != 0 {
+                // Bit 0 set: switch to Thumb mode
+                self.set_thumb_mode(true);
+                // set_pc will handle the bit 0
+                self.set_pc(pc_value);
+            } else {
+                // Bit 0 clear: stay in ARM mode
+                self.set_pc(pc_value);
+            }
+            return 3; // LDM with PC takes more cycles
+        }
+
+        self.r[15] = self.r[15].wrapping_add(4);
+        3 // Block data transfer takes 3+ cycles
     }
 
     fn execute_arm_branch(&mut self, opcode: u32, instruction_pc: u32, mem: &mut super::Memory) -> u32 {

@@ -4,11 +4,12 @@ A GBA emulator written in Rust following **Behavior Driven Development (BDD)** p
 
 ## Project Status
 
-**COMPLETE** ✅ - All core features implemented and tested
+**ACTIVE DEVELOPMENT** 🔄 - Core features implemented, undergoing ROM testing
 
-- ✅ 62 tests passing (100% pass rate)
 - ✅ Complete CPU (ARM + Thumb instruction sets)
 - ✅ Complete timing, DMA, and audio systems
+- ✅ ARM LDM/STM (Load/Store Multiple) instructions implemented
+- 🔄 GBA ROM test suite integration (Ralph Loop: 306 iterations)
 - ✅ Optional GUI application included
 - ✅ Ready for ROM loading and execution
 
@@ -306,9 +307,9 @@ Contributions are welcome! Areas for enhancement:
 
 MIT License - See LICENSE file for details
 
-## Author
+## Development Method
 
-Built with Claude Code using Ralph Loop methodology
+This project is built using **Claude Code** with the **Ralph Loop** methodology - an iterative development process that emphasizes continuous testing against real ROM test suites to ensure accurate emulation behavior.
 
 ---
 

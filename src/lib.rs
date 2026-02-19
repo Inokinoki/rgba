@@ -155,8 +155,7 @@ impl Gba {
 
         // DISPCNT (0x0400_0000)
         let dispcnt = u16::from_le_bytes([io[0], io[1]]);
-        self.ppu.set_display_enabled((dispcnt & 0x80) != 0);
-        self.ppu.set_display_mode((dispcnt & 0x7) as u8);
+        self.ppu.set_dispcnt(dispcnt);  // Set the full DISPCNT value at once
     }
 
     /// Sync PPU state TO Memory (DISPSTAT, VCOUNT)
@@ -186,18 +185,13 @@ impl Gba {
 
         // DISPCNT (0x0400_0000)
         let dispcnt = u16::from_le_bytes([io[0], io[1]]);
-        self.ppu.set_display_enabled((dispcnt & 0x80) != 0);
-        self.ppu.set_display_mode((dispcnt & 0x7) as u8);
+        self.ppu.set_dispcnt(dispcnt);  // Set the full DISPCNT value at once
 
         // BG0CNT - BG3CNT (0x0400_0008 - 0x0400_000E)
         for bg in 0..4 {
             let offset = 8 + (bg * 2);
             let bgcnt = u16::from_le_bytes([io[offset], io[offset + 1]]);
             self.ppu.set_bgcnt(bg, bgcnt);
-
-            // Enable/disable BG based on DISPCNT bits 8-11
-            let bg_enabled = (dispcnt & (0x100 << bg)) != 0;
-            self.ppu.set_bg_enabled(bg, bg_enabled);
         }
 
         // BG0HOFS - BG3VOFS (0x0400_0010 - 0x0400_002D)
@@ -229,9 +223,24 @@ impl Gba {
         &self.cpu
     }
 
+    /// Get a mutable reference to the CPU (for testing/initialization)
+    pub fn cpu_mut(&mut self) -> &mut Cpu {
+        &mut self.cpu
+    }
+
     /// Get CPU PC value
     pub fn cpu_pc(&self) -> u32 {
         self.cpu.get_pc()
+    }
+
+    /// Get a CPU register value
+    pub fn cpu_reg(&self, n: usize) -> u32 {
+        self.cpu.get_reg(n)
+    }
+
+    /// Get CPU CPSR value
+    pub fn cpu_get_cpsr(&self) -> u32 {
+        self.cpu.get_cpsr()
     }
 
     /// Get a reference to the memory system (for palette access)
@@ -392,6 +401,42 @@ impl Gba {
                 }
 
                 color
+            }
+            3 => {
+                // Mode 3: 240x160, 16-bit RGB565 at VRAM + (y * 240 + x) * 2
+                let vram = self.mem.vram();
+                let offset = ((y as usize * 240 + x as usize) * 2) as usize;
+                if offset + 1 < vram.len() {
+                    u16::from_le_bytes([vram[offset], vram[offset + 1]])
+                } else {
+                    0
+                }
+            }
+            4 => {
+                // Mode 4: 240x160, 8-bit palette indices at VRAM + (y * 240 + x)
+                // Page can be at 0x6000_0000 or 0x6000_A000 based on DISPCNT bit 4
+                let page_base = if (self.ppu.get_dispcnt() & 0x10) != 0 { 0xA000 } else { 0x0000 };
+                let vram = self.mem.vram();
+                let offset = page_base + (y as usize * 240 + x as usize);
+                if offset < vram.len() {
+                    let color_index = vram[offset] as u16;
+                    // Look up in palette
+                    self.get_palette_color(0, color_index)
+                } else {
+                    0
+                }
+            }
+            5 => {
+                // Mode 5: 160x128, 16-bit RGB565 at VRAM + page_base + (y * 160 + x) * 2
+                // Page can be at 0x6000_0000 or 0x6000_A000 based on DISPCNT bit 4
+                let page_base = if (self.ppu.get_dispcnt() & 0x10) != 0 { 0xA000 } else { 0x0000 };
+                let vram = self.mem.vram();
+                let offset = page_base + ((y as usize * 160 + x as usize) * 2);
+                if offset + 1 < vram.len() {
+                    u16::from_le_bytes([vram[offset], vram[offset + 1]])
+                } else {
+                    0
+                }
             }
             _ => 0, // Other modes handled elsewhere
         }

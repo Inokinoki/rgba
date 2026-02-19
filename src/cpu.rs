@@ -107,7 +107,7 @@ impl Cpu {
         self.banked_spsr = [0; 6];
         self.cpsr = 0x000000DF; // System mode, IRQ/FIQ disabled, ARM mode
         self.r[13] = 0x0300_7F00; // SP (stack pointer) - points to IWRAM
-        self.r[14] = 0x0800_0000; // LR (link register) - points to ROM entry
+        self.r[14] = 0x0800_0004; // LR (link register)
         self.r[15] = 0x0800_0000; // PC (program counter) - ROM entry point
         self.pipeline = [0; 3];
         self.pipeline_pc = [0; 3];
@@ -166,8 +166,15 @@ impl Cpu {
         self.r[15]
     }
 
+    pub fn get_cpsr(&self) -> u32 {
+        self.cpsr
+    }
+
     pub fn set_pc(&mut self, val: u32) {
         self.r[15] = val & 0xFFFFFFFC; // Align to word
+        #[cfg(debug_assertions)]
+        eprintln!("set_pc: setting R15 to 0x{:08X}, flushing pipeline", self.r[15]);
+        self.pipeline_loaded = false; // Flush pipeline when PC is explicitly set
     }
 
     // Mode access
@@ -331,18 +338,21 @@ impl Cpu {
     fn step_arm(&mut self, mem: &mut super::Memory) -> u32 {
         // Load pipeline if needed
         if !self.pipeline_loaded {
-            self.pipeline_pc[0] = self.r[15];
-            self.pipeline[0] = mem.read_word(self.r[15]);
-            // Advance PC AFTER loading pipeline
-            self.r[15] = self.r[15].wrapping_add(4);
+            // Start loading from current PC
+            let mut pc = self.r[15];
 
-            self.pipeline_pc[1] = self.r[15];
-            self.pipeline[1] = mem.read_word(self.r[15]);
-            self.r[15] = self.r[15].wrapping_add(4);
+            self.pipeline_pc[0] = pc;
+            self.pipeline[0] = mem.read_word(pc);
+            pc = pc.wrapping_add(4);
 
-            self.pipeline_pc[2] = self.r[15];
-            self.pipeline[2] = mem.read_word(self.r[15]);
-            self.r[15] = self.r[15].wrapping_add(4);
+            self.pipeline_pc[1] = pc;
+            self.pipeline[1] = mem.read_word(pc);
+            pc = pc.wrapping_add(4);
+
+            self.pipeline_pc[2] = pc;
+            self.pipeline[2] = mem.read_word(pc);
+            // PC should point to the instruction being fetched (pipeline_pc[2])
+            self.r[15] = pc;
 
             self.pipeline_loaded = true;
         }
@@ -351,6 +361,15 @@ impl Cpu {
         let opcode = self.pipeline[0];
         let instruction_pc = self.pipeline_pc[0];
         let pc_at_execution = self.r[15];
+
+        #[cfg(debug_assertions)]
+        if instruction_pc >= 0x08000000 && instruction_pc <= 0x08000020 {
+            eprintln!("Executing instruction at PC=0x{:08X}, opcode=0x{:08X}", instruction_pc, opcode);
+            eprintln!("  Before shift: pipeline[0] = 0x{:08X} at 0x{:08X}", self.pipeline[0], self.pipeline_pc[0]);
+            eprintln!("  Before shift: pipeline[1] = 0x{:08X} at 0x{:08X}", self.pipeline[1], self.pipeline_pc[1]);
+            eprintln!("  Before shift: pipeline[2] = 0x{:08X} at 0x{:08X}", self.pipeline[2], self.pipeline_pc[2]);
+            eprintln!("  R15 = 0x{:08X}", self.r[15]);
+        }
 
         self.pipeline[0] = self.pipeline[1];
         self.pipeline_pc[0] = self.pipeline_pc[1];
@@ -362,11 +381,15 @@ impl Cpu {
         let cycles = self.execute_arm_with_pc(opcode, mem, instruction_pc, pc_at_execution);
 
         // Only fetch next instruction if PC wasn't modified (branch, etc.)
+        // Check if PC advanced by 4 from its value before execution
         if self.r[15] == pc_at_execution.wrapping_add(4) {
             // PC was incremented normally, fetch next
-            self.pipeline_pc[2] = self.r[15];
-            self.pipeline[2] = mem.read_word(self.r[15]);
-            self.r[15] = self.r[15].wrapping_add(4);
+            // The next instruction to fetch is after what's now in pipeline[1]
+            let next_pc = self.pipeline_pc[1].wrapping_add(4);
+            self.pipeline_pc[2] = next_pc;
+            self.pipeline[2] = mem.read_word(next_pc);
+            // PC should point to the instruction being fetched (pipeline_pc[2])
+            self.r[15] = next_pc;
         } else {
             // PC was modified by instruction (branch, etc.)
             // Pipeline will be reloaded on next call
@@ -377,40 +400,69 @@ impl Cpu {
     }
 
     fn execute_arm_with_pc(&mut self, opcode: u32, mem: &mut super::Memory, instruction_pc: u32, pc_at_execution: u32) -> u32 {
+        // Extract condition field (bits 31-28)
+        let cond = ((opcode >> 28) & 0xF) as usize;
+
+        // Check if condition is satisfied
+        if !self.check_condition(cond) {
+            // Condition not met, skip this instruction
+            // Still advance PC and take cycles
+            self.r[15] = self.r[15].wrapping_add(4);
+            return 1;
+        }
+
         // ARM instruction decoding
         // Bits 27-26: Instruction category
         let category = (opcode >> 26) & 0x3;
 
         match category {
             0x0 => {
-                // Data processing / PSR transfer
-                if (opcode & 0x0FB0_0000) == 0x0100_0000 {
+                // Data processing / PSR transfer / Load-store halfword and signed byte
+                let bits_27_25 = (opcode >> 25) & 0x7;
+
+                // Check for BX first (before other category 0x0 checks)
+                if (opcode & 0x0FFF_FFF0) == 0x012F_FF10 {
+                    // Branch and exchange
+                    self.execute_arm_bx(opcode, mem)
+                } else if (opcode >> 25) & 0x7 == 0b000 && ((opcode >> 4) & 0xF) != 0x9 {
+                    let bit5 = (opcode & 0x0000_0020) != 0;
+                    let bit6 = (opcode & 0x0000_0040) != 0;
+                    if bit5 || bit6 {
+                        // Load-store halfword or signed byte
+                        self.execute_arm_load_store_halfword(opcode, mem)
+                    } else if (opcode & 0x00F0_FFF0) == 0x0000_00B0 || (opcode & 0x00F0_FFF0) == 0x0000_F0B0 {
+                        // SWP/B - swap
+                        self.execute_arm_load_store(opcode, mem)
+                    } else if (opcode & 0x0FB0_0000) == 0x0100_0000 {
+                        // PSR transfer
+                        self.execute_arm_psr(opcode, mem)
+                    } else {
+                        // Data processing
+                        self.execute_arm_data_processing(opcode, mem)
+                    }
+                } else if (opcode & 0x0FB0_0000) == 0x0100_0000 {
                     // PSR transfer
                     self.execute_arm_psr(opcode, mem)
                 } else {
+                    // Data processing
                     self.execute_arm_data_processing(opcode, mem)
                 }
             }
             0x1 => {
                 // Load/store immediate offset
-                if (opcode & 0xFFFF_FFF0) == 0x0120_FFF0 {
-                    // Branch and exchange
-                    self.execute_arm_bx(opcode, mem)
-                } else {
-                    self.execute_arm_load_store(opcode, mem)
-                }
+                self.execute_arm_load_store(opcode, mem)
             }
             0x2 => {
                 // Load/store register offset / LDM / STM / Branch
                 // Check bits 27-25 to distinguish sub-types
                 let bits_27_25 = (opcode >> 25) & 0x7;
 
-                if bits_27_25 == 0b100 || bits_27_25 == 0b101 {
+                if bits_27_25 == 0b101 {
+                    // Branch (B) or Branch with Link (BL)
+                    self.execute_arm_branch(opcode, instruction_pc, mem)
+                } else if bits_27_25 == 0b100 {
                     // LDM (Load Multiple) or STM (Store Multiple)
                     self.execute_arm_block_data_transfer(opcode, mem)
-                } else if (opcode & 0x0E00_0000) == 0x0A00_0000 {
-                    // Branch (B)
-                    self.execute_arm_branch(opcode, instruction_pc, mem)
                 } else {
                     // Load/store with register offset
                     self.execute_arm_load_store_register(opcode, mem)
@@ -431,19 +483,15 @@ impl Cpu {
         let rn = ((opcode >> 16) & 0xF) as usize;
         let rd = ((opcode >> 12) & 0xF) as usize;
         let operand2 = opcode & 0xFFF;
-
-        // Debug: print detailed state for EORS instruction
-        if op == 0x1 && rd == 5 && s {
-            eprintln!("  [DEBUG] EORS at PC=0x{:08X}", self.r[15]);
-            eprintln!("           R5=0x{:08X} R3=0x{:08X} R12=0x{:08X} R6=0x{:08X}",
-                        self.r[5], self.r[3], self.r[12], self.r[6]);
-            eprintln!("           CPSR=0x{:08X} Thumb={}",
-                        self.cpsr, self.is_thumb_mode());
-        }
+        let i_bit = ((opcode >> 25) & 1) != 0;  // Immediate flag
 
         // Get operands
         let rn_val = self.r[rn];
-        let op2_val = self.decode_operand2(operand2);
+        let op2_val = self.decode_operand2(operand2, i_bit);
+
+        // Debug: track R12 modifications
+        #[cfg(debug_assertions)]
+        let r12_before = self.r[12];
 
         match op {
             0x0 => {
@@ -544,42 +592,38 @@ impl Cpu {
                 }
             }
             0x8 => {
-                // TST
+                // TST - always sets flags
                 let result = rn_val & op2_val;
-                if s {
-                    self.set_flags_from_result(result);
-                }
+                self.set_flags_from_result(result);
             }
             0x9 => {
-                // TEQ
+                // TEQ - always sets flags
                 let result = rn_val ^ op2_val;
-                if s {
-                    self.set_flags_from_result(result);
+                self.set_flags_from_result(result);
+                #[cfg(debug_assertions)]
+                if rd == 12 {
+                    eprintln!("TEQ: Rd=R12, instruction=0x{:08X}, R12 before=0x{:08X}", opcode, self.r[12]);
                 }
             }
             0xA => {
-                // CMP
+                // CMP - always sets flags
                 let (result, overflow) = rn_val.overflowing_sub(op2_val);
-                if s {
-                    self.set_flag_n((result as i32) < 0);
-                    self.set_flag_z(result == 0);
-                    self.set_flag_c(!overflow);
-                    self.set_flag_v(((rn_val as i32) < (op2_val as i32)) ^
-                                    ((result as i32) < 0));
-                }
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(!overflow);
+                self.set_flag_v(((rn_val as i32) < (op2_val as i32)) ^
+                                ((result as i32) < 0));
             }
             0xB => {
-                // CMN
+                // CMN - always sets flags
                 let (result, overflow) = rn_val.overflowing_add(op2_val);
-                if s {
-                    self.set_flag_n((result as i32) < 0);
-                    self.set_flag_z(result == 0);
-                    self.set_flag_c(overflow);
-                    self.set_flag_v(((rn_val as i32) > 0 && (op2_val as i32) > 0 &&
-                                    (result as i32) < 0) ||
-                                   ((rn_val as i32) < 0 && (op2_val as i32) < 0 &&
-                                    (result as i32) > 0));
-                }
+                self.set_flag_n((result as i32) < 0);
+                self.set_flag_z(result == 0);
+                self.set_flag_c(overflow);
+                self.set_flag_v(((rn_val as i32) > 0 && (op2_val as i32) > 0 &&
+                                (result as i32) < 0) ||
+                               ((rn_val as i32) < 0 && (op2_val as i32) < 0 &&
+                                (result as i32) > 0));
             }
             0xC => {
                 // ORR
@@ -591,9 +635,21 @@ impl Cpu {
             }
             0xD => {
                 // MOV
-                self.r[rd] = op2_val;
-                if s {
-                    self.set_flags_from_result(op2_val);
+                if rd == 15 {
+                    // MOV to PC: branch to the address
+                    // Bit 0 determines ARM/Thumb mode
+                    let thumb = (op2_val & 1) != 0;
+                    self.set_pc(op2_val & 0xFFFFFFFE);
+                    if s {
+                        self.set_flags_from_result(op2_val);
+                    }
+                    self.set_thumb_mode(thumb);
+                    return 1; // Return early - don't increment PC
+                } else {
+                    self.r[rd] = op2_val;
+                    if s {
+                        self.set_flags_from_result(op2_val);
+                    }
                 }
             }
             0xE => {
@@ -614,20 +670,47 @@ impl Cpu {
             _ => {}
         }
 
+        // Check if PC was the destination register (but not for test/comparison ops)
+        // TST (0x8), TEQ (0x9), CMP (0xA), CMN (0xB) don't write to rd
+        if rd == 15 && op < 0x8 {
+            // Data processing to PC: branch to the result
+            let result = self.r[15]; // The result was already stored above
+            let thumb = (result & 1) != 0;
+            self.set_pc(result & 0xFFFFFFFE);
+            self.set_thumb_mode(thumb);
+            return 1; // Return early - don't increment PC
+        }
+
         self.r[15] = self.r[15].wrapping_add(4);
+
+        // Debug: check if R12 changed
+        #[cfg(debug_assertions)]
+        if self.r[12] != r12_before {
+            eprintln!("R12 CHANGED in data processing op=0x{:X}, rd={}, opcode=0x{:08X}: 0x{:08X} -> 0x{:08X}",
+                     op, rd, opcode, r12_before, self.r[12]);
+        }
+
         1
     }
 
-    fn decode_operand2(&self, operand2: u32) -> u32 {
-        // Decode operand2 for data processing
-        let imm = (operand2 & 1) != 0;
+    fn decode_operand2(&self, operand2: u32, is_immediate: bool) -> u32 {
+        // Decode operand2 for data processing instructions
+        // is_immediate: bit 25 of instruction (I bit)
         let shift = (operand2 >> 4) & 0xFF;
 
-        if imm {
+        if is_immediate {
             // Immediate value with rotate
-            let imm8 = operand2 & 0xFF;
+            let imm8 = (operand2 & 0xFF) as u32;
             let rotate = ((operand2 >> 8) & 0xF) * 2;
-            imm8.rotate_right(rotate)
+            let result = imm8.rotate_right(rotate);
+
+            #[cfg(debug_assertions)]
+            if false {  // Disabled for now
+                eprintln!("decode_operand2: operand2=0x{:04X}, imm8=0x{:02X}, rotate={}, result=0x{:08X}",
+                    operand2, imm8, rotate, result);
+            }
+
+            result
         } else {
             // Register with shift
             let rm = (operand2 & 0xF) as usize;
@@ -655,6 +738,9 @@ impl Cpu {
     }
 
     fn execute_arm_psr(&mut self, opcode: u32, _mem: &mut super::Memory) -> u32 {
+        // Note: We don't have instruction_pc here, so we can't log it accurately
+        // The logging will be done at the call site
+
         let mrs = (opcode & (1 << 21)) != 0;
         let psr = (opcode & (1 << 22)) != 0; // 0 = CPSR, 1 = SPSR
 
@@ -699,15 +785,28 @@ impl Cpu {
                 self.set_spsr(spsr);
             } else {
                 // MSR CPSR, {Rm|#imm}
+                // Note: instruction_pc is not available here, logging is done at call site
+
                 if apply_flags {
-                    self.cpsr = (self.cpsr & 0x0FFFFF00) | (val & 0x000000FF);
+                    // Apply only to flag bits (N, Z, C, V = bits 31-28)
+                    self.cpsr = (self.cpsr & 0x0FFFFFFF) | (val & 0xF0000000);
                 }
                 if apply_control || apply_status || apply_extension {
-                    self.cpsr = (self.cpsr & 0x000000FF) | (val & 0xFFFFFF00);
-                    // Mode change might have happened
-                    let new_mode = Mode::from_bits(self.cpsr);
-                    if new_mode != self.get_mode() {
-                        self.set_mode(new_mode);
+                    // In User mode, only flags can be written
+                    // In privileged modes, control/status/extension can be written
+                    if self.get_mode() != Mode::User {
+                        // Preserve flag bits that were just set by apply_flags
+                        let flags = self.cpsr & 0xF0000000;
+                        self.cpsr = (self.cpsr & 0x000000FF) | (val & 0xFFFFFF00);
+                        // Restore flag bits to prevent overwrite
+                        if apply_flags {
+                            self.cpsr = (self.cpsr & 0x0FFFFFFF) | flags;
+                        }
+                        // Mode change might have happened
+                        let new_mode = Mode::from_bits(self.cpsr);
+                        if new_mode != self.get_mode() {
+                            self.set_mode(new_mode);
+                        }
                     }
                 }
             }
@@ -717,9 +816,80 @@ impl Cpu {
         1
     }
 
+    fn execute_arm_load_store_halfword(&mut self, opcode: u32, mem: &mut super::Memory) -> u32 {
+        // Load/store halfword and signed byte
+        let rn = ((opcode >> 16) & 0xF) as usize;
+        let rd = ((opcode >> 12) & 0xF) as usize;
+        let load = ((opcode >> 20) & 1) != 0; // L bit
+        let writeback = ((opcode >> 21) & 1) != 0; // W bit
+        let is_immediate = ((opcode >> 22) & 1) != 0; // I bit
+        let pre_index = ((opcode >> 24) & 1) != 0; // P bit
+
+        // Calculate offset
+        let offset = if is_immediate {
+            // Immediate offset (bits 0-3 and 8-11)
+            let imm4h = ((opcode >> 8) & 0xF) as u32;
+            let imm4l = (opcode & 0xF) as u32;
+            (imm4h << 4) | imm4l
+        } else {
+            // Register offset
+            let rm = (opcode & 0xF) as usize;
+            self.r[rm]
+        };
+
+        // Calculate address
+        let base = self.r[rn];
+        let addr = if pre_index {
+            base.wrapping_add(offset)
+        } else {
+            base
+        };
+
+        // Perform load or store
+        if load {
+            let is_signed = ((opcode >> 6) & 1) != 0; // S bit
+            let is_halfword = ((opcode >> 5) & 1) != 0; // H bit
+
+            let val = if is_signed {
+                if is_halfword {
+                    // LDRSH - Load signed halfword
+                    mem.read_half(addr) as i16 as i32 as u32
+                } else {
+                    // LDRSB - Load signed byte
+                    mem.read_byte(addr) as i8 as i32 as u32
+                }
+            } else {
+                // LDRH - Load halfword (zero-extended)
+                mem.read_half(addr) as u32
+            };
+
+            self.r[rd] = val;
+        } else {
+            // STRH - Store halfword
+            mem.write_half(addr, self.r[rd] as u16);
+        }
+
+        // Update base register if needed
+        let final_addr = if pre_index {
+            addr
+        } else {
+            base.wrapping_add(offset)
+        };
+
+        if writeback || !pre_index {
+            self.r[rn] = final_addr;
+        }
+
+        self.r[15] = self.r[15].wrapping_add(4);
+        1
+    }
+
     fn execute_arm_bx(&mut self, opcode: u32, _mem: &mut super::Memory) -> u32 {
         let rm = (opcode & 0xF) as usize;
         let target = self.r[rm];
+
+        #[cfg(debug_assertions)]
+        eprintln!("BX: R{} = 0x{:08X}, Thumb bit = {}", rm, target, (target & 1) != 0);
 
         self.set_thumb_mode((target & 1) != 0);
         self.set_pc(target);
@@ -732,7 +902,14 @@ impl Cpu {
         let rn = ((_opcode >> 16) & 0xF) as usize;
         let rd = ((_opcode >> 12) & 0xF) as usize;
         let offset = (_opcode & 0xFFF) as i32 as i64;
-        let base = self.r[rn] as i64;
+
+        // When using PC as base register, the value is already PC+8 from pipeline
+        // So we don't need to add anything extra
+        let base = if rn == 15 {
+            self.r[rn] as i64
+        } else {
+            self.r[rn] as i64
+        };
 
         let load = (_opcode >> 20) & 1 != 0;
         let byte = (_opcode >> 22) & 1 != 0;
@@ -746,10 +923,20 @@ impl Cpu {
         };
 
         if load {
-            if byte {
-                self.r[rd] = mem.read_byte(addr) as u32;
+            let val = if byte {
+                mem.read_byte(addr) as u32
             } else {
-                self.r[rd] = mem.read_word(addr);
+                mem.read_word(addr)
+            };
+
+            if rd == 15 {
+                // Loading into PC: branch to loaded address
+                // ARM architecture: loaded value should have bit 0 cleared
+                // Note: When loading into PC, we DON'T increment PC afterward
+                self.set_pc(val & 0xFFFFFFFE);
+                return 2; // Return early - PC is already set
+            } else {
+                self.r[rd] = val;
             }
         } else {
             if byte {
@@ -798,10 +985,18 @@ impl Cpu {
         };
 
         if load {
-            if byte {
-                self.r[rd] = mem.read_byte(addr) as u32;
+            let val = if byte {
+                mem.read_byte(addr) as u32
             } else {
-                self.r[rd] = mem.read_word(addr);
+                mem.read_word(addr)
+            };
+
+            if rd == 15 {
+                // Loading into PC: branch to loaded address
+                // ARM architecture: loaded value should have bit 0 cleared
+                self.set_pc(val & 0xFFFFFFFE);
+            } else {
+                self.r[rd] = val;
             }
         } else {
             if byte {
@@ -851,7 +1046,8 @@ impl Cpu {
             if reg_list & (1 << reg_idx) != 0 {
                 if load {
                     // LDM: load from memory into register
-                    self.r[reg_idx] = mem.read_word(addr);
+                    let val = mem.read_word(addr);
+                    self.r[reg_idx] = val;
                 } else {
                     // STM: store register to memory
                     mem.write_word(addr, self.r[reg_idx]);
@@ -870,12 +1066,18 @@ impl Cpu {
                 let reg_count = reg_list.count_ones() as u32;
                 self.r[rn] = self.r[rn].wrapping_add(reg_count * 4);
             }
+        } else if !add_to_base && writeback && pre_index {
+            // Pre-index decrement writeback
+            let reg_count = reg_list.count_ones() as u32;
+            self.r[rn] = self.r[rn].wrapping_sub(reg_count * 4);
         }
 
         // Handle PC (R15) loading in LDM
         if load && (reg_list & (1 << 15)) != 0 {
             // When PC is loaded from LDM, switch mode based on bit 0
             let pc_value = self.r[15];
+            #[cfg(debug_assertions)]
+            eprintln!("LDM loading PC with value 0x{:08X}, R15 before=0x{:08X}", pc_value, self.r[15]);
             if pc_value & 1 != 0 {
                 // Bit 0 set: switch to Thumb mode
                 self.set_thumb_mode(true);
@@ -885,6 +1087,8 @@ impl Cpu {
                 // Bit 0 clear: stay in ARM mode
                 self.set_pc(pc_value);
             }
+            #[cfg(debug_assertions)]
+            eprintln!("LDM after set_pc: R15=0x{:08X}", self.r[15]);
             return 3; // LDM with PC takes more cycles
         }
 
@@ -911,6 +1115,12 @@ impl Cpu {
 
         let link = ((opcode >> 24) & 1) != 0;
 
+        #[cfg(debug_assertions)]
+        if instruction_pc >= 0x08000100 && instruction_pc <= 0x08000120 {
+            eprintln!("BRANCH: instruction_pc=0x{:08X}, opcode=0x{:08X}, link={}, offset={}, target_before_add=0x{:08X}",
+                     instruction_pc, opcode, link, offset, instruction_pc.wrapping_add(8));
+        }
+
         // instruction_pc is the address of the instruction being executed
         // The branch offset is relative to this address
         if link {
@@ -920,6 +1130,11 @@ impl Cpu {
 
         // Calculate branch target
         let target = instruction_pc.wrapping_add(8).wrapping_add(offset as u32);
+
+        #[cfg(debug_assertions)]
+        if instruction_pc >= 0x08000100 && instruction_pc <= 0x08000120 {
+            eprintln!("BRANCH: target=0x{:08X}, setting PC", target);
+        }
 
         // Set PC using set_pc which aligns to word boundary
         self.set_pc(target);
@@ -941,7 +1156,7 @@ impl Cpu {
             0x00 => {
                 // SoftReset - reset the system
                 self.reset();
-                self.r[15] = 0x08000000;
+                self.set_pc(0x08000000);
             }
             0x01 => {
                 // RegisterRamReset - reset memory regions
@@ -1568,10 +1783,18 @@ impl Cpu {
         let addr = self.r[rb].wrapping_add(offset);
 
         if load {
-            if byte {
-                self.r[rd] = mem.read_byte(addr) as u32;
+            let val = if byte {
+                mem.read_byte(addr) as u32
             } else {
-                self.r[rd] = mem.read_word(addr);
+                mem.read_word(addr)
+            };
+
+            if rd == 15 {
+                // Loading into PC: branch to loaded address
+                // ARM architecture: loaded value should have bit 0 cleared
+                self.set_pc(val & 0xFFFFFFFE);
+            } else {
+                self.r[rd] = val;
             }
         } else {
             if byte {

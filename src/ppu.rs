@@ -165,6 +165,16 @@ impl Ppu {
         self.dispcnt = DisplayControl::from_bits_truncate(bits | (mode as u16 & 0x7));
     }
 
+    /// Set the full DISPCNT value from memory
+    pub fn set_dispcnt(&mut self, val: u16) {
+        self.dispcnt = DisplayControl::from_bits_truncate(val);
+    }
+
+    /// Get the full DISPCNT value
+    pub fn get_dispcnt(&self) -> u16 {
+        self.dispcnt.bits()
+    }
+
     pub fn get_width(&self) -> u16 {
         match self.get_display_mode() {
             3 | 4 => 240,
@@ -265,7 +275,9 @@ impl Ppu {
         if bg > 3 {
             return 0;
         }
-        ((self.bgcnt[bg] >> 2) & 0x3) * 16 // In 16KB units
+        // BG tile base is in 16KB units (bits 2-3 of BGCNT)
+        // 0 = 0x0000, 1 = 0x4000, 2 = 0x8000, 3 = 0xC000
+        ((self.bgcnt[bg] >> 2) & 0x3) * 0x4000
     }
 
     pub fn set_bg_tile_base(&mut self, bg: usize, base: u16) {
@@ -279,7 +291,9 @@ impl Ppu {
         if bg > 3 {
             return 0;
         }
-        ((self.bgcnt[bg] >> 8) & 0x1F) * 2 // In 2KB units
+        // BG map base is in 2KB units (bits 8-12 of BGCNT)
+        // Each unit is 0x800 bytes
+        ((self.bgcnt[bg] >> 8) & 0x1F) * 0x800
     }
 
     pub fn set_bg_map_base(&mut self, bg: usize, base: u16) {

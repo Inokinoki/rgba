@@ -197,9 +197,41 @@ pub struct Memory {
 
 impl Memory {
     pub fn new() -> Self {
-        // Initialize BIOS with default GBA BIOS
-        // For now, just fill with zeros
-        let bios = vec![0u8; 0x4000];
+        // Initialize BIOS with stub implementation
+        // Fill with ARM NOP (0xE1A00000) and function returns at key locations
+        let mut bios = vec![0u8; 0x4000];
+
+        // Fill most of BIOS with ARM NOP (0xE1A00000 in little endian)
+        for i in (0..0x4000).step_by(4) {
+            bios[i] = 0x00;
+            bios[i + 1] = 0x00;
+            bios[i + 2] = 0xA0;
+            bios[i + 3] = 0xE1;
+        }
+
+        // At BIOS entry point (0x00000000), we need to:
+        // 1. Set up SP properly (0x03007F00 for IRQ mode, 0x03007FE0 for SVC mode)
+        // 2. Do other initialization
+        // 3. Jump to ROM at 0x08000000
+        //
+        // For now, just jump to ROM directly
+        // B 0x08000004 (jump to ROM entry + skip header)
+        // 0xEA00003E in little endian: 3E 00 00 EA
+        bios[0] = 0x3E;
+        bios[1] = 0x00;
+        bios[2] = 0x00;
+        bios[3] = 0xEA;
+
+        // At key BIOS entry points used by tests, put "BX LR" or "MOV PC, LR" to return
+        // BX LR in ARM: 0xE12FFF1E
+        let bios_return: [u8; 4] = [0x1E, 0xFF, 0x2F, 0xE1];
+
+        // Set returns at common BIOS call points
+        for offset in [0x164, 0x17C, 0x200, 0x208].iter() {
+            if *offset + 4 <= 0x4000 {
+                bios[*offset..(*offset + 4)].copy_from_slice(&bios_return);
+            }
+        }
 
         Self {
             bios,
@@ -293,14 +325,47 @@ impl Memory {
     fn map_address(&self, addr: u32) -> (MemoryRegion, usize) {
         match addr {
             0x0000_0000..=0x0000_3FFF => (MemoryRegion::Bios, (addr - 0x0000_0000) as usize),
-            0x0200_0000..=0x0203_FFFF => (MemoryRegion::Wram, (addr - 0x0200_0000) as usize),
-            0x0300_0000..=0x0300_7FFF => (MemoryRegion::Iwram, (addr - 0x0300_0000) as usize),
+            // EWRAM (256KB) and its mirrors
+            0x0200_0000..=0x020F_FFFF => {
+                let offset = ((addr - 0x0200_0000) & 0x3_FFFF) as usize; // Mask to 256KB
+                (MemoryRegion::Wram, offset)
+            }
+            // IWRAM (32KB) and its mirrors
+            0x0300_0000..=0x030F_FFFF => {
+                let offset = ((addr - 0x0300_0000) & 0x7FFF) as usize; // Mask to 32KB
+                (MemoryRegion::Iwram, offset)
+            }
             0x0400_0000..=0x0400_03FE => (MemoryRegion::Io, (addr - 0x0400_0000) as usize),
+            // Palette (1KB) and its mirrors
             0x0500_0000..=0x0500_03FF => (MemoryRegion::Palette, (addr - 0x0500_0000) as usize),
-            0x0600_0000..=0x0601_7FFF => (MemoryRegion::Vram, (addr - 0x0600_0000) as usize),
+            0x0500_0400..=0x050F_FFFF => {
+                let offset = ((addr - 0x0500_0000) & 0x3FF) as usize; // Mask to 1KB
+                (MemoryRegion::Palette, offset)
+            }
+            // VRAM (96KB) and its mirrors
+            0x0600_0000..=0x060F_FFFF => {
+                let offset = ((addr - 0x0600_0000) & 0x1_7FFF) as usize; // Mask to 96KB
+                (MemoryRegion::Vram, offset)
+            }
+            // OAM (1KB) and its mirrors
             0x0700_0000..=0x0700_03FF => (MemoryRegion::Oam, (addr - 0x0700_0000) as usize),
-            0x0800_0000..=0x0DFF_FFFF => {
+            0x0700_0400..=0x070F_FFFF => {
+                let offset = ((addr - 0x0700_0000) & 0x3FF) as usize; // Mask to 1KB
+                (MemoryRegion::Oam, offset)
+            }
+            // ROM (with mirrors)
+            0x0800_0000..=0x09FF_FFFF => {
                 let offset = (addr - 0x0800_0000) as usize;
+                (MemoryRegion::Rom, offset % self.rom.len().max(1))
+            }
+            // ROM mirror at 0x0A000000-0x0BFFFFFF (GamePak mirror 1)
+            0x0A00_0000..=0x0BFF_FFFF => {
+                let offset = (addr - 0x0A00_0000) as usize;
+                (MemoryRegion::Rom, offset % self.rom.len().max(1))
+            }
+            // ROM mirror at 0x0C000000-0x0DFFFFFF (GamePak mirror 2)
+            0x0C00_0000..=0x0DFF_FFFF => {
+                let offset = (addr - 0x0C00_0000) as usize;
                 (MemoryRegion::Rom, offset % self.rom.len().max(1))
             }
             _ => (MemoryRegion::Unknown, 0),
@@ -330,8 +395,8 @@ impl Memory {
         }
     }
 
-    /// Write a byte to memory
-    pub fn write_byte(&mut self, addr: u32, val: u8) {
+    /// Write a byte to memory (internal, used by write_word)
+    fn write_byte_internal(&mut self, addr: u32, val: u8) {
         let (region, offset) = self.map_address(addr);
 
         match region {
@@ -339,7 +404,9 @@ impl Memory {
                 // BIOS is read-only
             }
             MemoryRegion::Wram => self.wram[offset] = val,
-            MemoryRegion::Iwram => self.iwram[offset] = val,
+            MemoryRegion::Iwram => {
+                self.iwram[offset] = val;
+            }
             MemoryRegion::Io => self.write_io(addr, val),
             MemoryRegion::Palette => self.palette[offset] = val,
             MemoryRegion::Vram => self.vram[offset] = val,
@@ -349,6 +416,37 @@ impl Memory {
             }
             MemoryRegion::Unknown => {}
         }
+    }
+
+    /// Write a byte to memory (public, handles OAM and VRAM byte-write restrictions)
+    pub fn write_byte(&mut self, addr: u32, val: u8) {
+        let (region, offset) = self.map_address(addr);
+
+        // OAM ignores byte writes (only accepts 16-bit or 32-bit aligned writes)
+        if region == MemoryRegion::Oam {
+            return;
+        }
+
+        // VRAM: byte writes are expanded to halfwords (duplicated in both bytes)
+        // This happens in ALL modes according to GBA behavior
+        if region == MemoryRegion::Vram {
+            let half_offset = offset & !1; // Align to halfword boundary
+            let half_val = ((val as u16) << 8) | (val as u16); // Duplicate byte
+            self.vram[half_offset] = (half_val & 0xFF) as u8;
+            self.vram[half_offset + 1] = ((half_val >> 8) & 0xFF) as u8;
+            return;
+        }
+
+        // Palette RAM: byte writes are expanded to halfwords (duplicated in both bytes)
+        if region == MemoryRegion::Palette {
+            let half_offset = offset & !1; // Align to halfword boundary
+            let half_val = ((val as u16) << 8) | (val as u16); // Duplicate byte
+            self.palette[half_offset] = (half_val & 0xFF) as u8;
+            self.palette[half_offset + 1] = ((half_val >> 8) & 0xFF) as u8;
+            return;
+        }
+
+        self.write_byte_internal(addr, val);
     }
 
     /// Read a halfword (16-bit) from memory
@@ -377,8 +475,8 @@ impl Memory {
     /// Write a halfword (16-bit) to memory
     pub fn write_half(&mut self, addr: u32, val: u16) {
         let bytes = val.to_le_bytes();
-        self.write_byte(addr, bytes[0]);
-        self.write_byte(addr + 1, bytes[1]);
+        self.write_byte_internal(addr, bytes[0]);
+        self.write_byte_internal(addr + 1, bytes[1]);
     }
 
     /// Read a word (32-bit) from memory
@@ -387,14 +485,14 @@ impl Memory {
             // Unaligned read - rotate
             let aligned = addr & !3;
             let low = self.read_half(aligned) as u32;
-            let high = self.read_half(aligned + 2) as u32;
+            let high = self.read_half(aligned.wrapping_add(2)) as u32;
             let val = low | (high << 16);
             val.rotate_right(8 * (addr & 3) as u32)
         } else {
             let b0 = self.read_byte(addr) as u32;
-            let b1 = self.read_byte(addr + 1) as u32;
-            let b2 = self.read_byte(addr + 2) as u32;
-            let b3 = self.read_byte(addr + 3) as u32;
+            let b1 = self.read_byte(addr.wrapping_add(1)) as u32;
+            let b2 = self.read_byte(addr.wrapping_add(2)) as u32;
+            let b3 = self.read_byte(addr.wrapping_add(3)) as u32;
             b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
         }
     }
@@ -403,7 +501,7 @@ impl Memory {
     pub fn write_word(&mut self, addr: u32, val: u32) {
         let bytes = val.to_le_bytes();
         for i in 0..4usize {
-            self.write_byte(addr + i as u32, bytes[i]);
+            self.write_byte_internal(addr.wrapping_add(i as u32), bytes[i]);
         }
     }
 
@@ -411,10 +509,10 @@ impl Memory {
     fn read_io(&mut self, addr: u32) -> u8 {
         let offset = (addr - 0x0400_0000) as usize;
 
-        // Handle interrupt registers
+        // Handle interrupt registers (IE is at 0x0400_0200, not 0x0400_0000!)
         let (int_offset, byte_index) = match addr {
-            0x0400_0000 | 0x0400_0001 => (Some(0x000), (addr & 1) as usize), // IE
-            0x0400_0002 | 0x0400_0003 => (Some(0x002), (addr & 1) as usize), // IF
+            0x0400_0200 | 0x0400_0201 => (Some(0x200), (addr & 1) as usize), // IE
+            0x0400_0202 | 0x0400_0203 => (Some(0x202), (addr & 1) as usize), // IF
             0x0400_0208 => (Some(0x208), 0), // IME
             _ => (None, 0),
         };
@@ -442,10 +540,10 @@ impl Memory {
     fn write_io(&mut self, addr: u32, val: u8) {
         let offset = (addr - 0x0400_0000) as usize;
 
-        // Handle interrupt registers
+        // Handle interrupt registers (IE is at 0x0400_0200, not 0x0400_0000!)
         let (int_offset, byte_index) = match addr {
-            0x0400_0000 | 0x0400_0001 => (Some(0x000), (addr & 1) as usize), // IE
-            0x0400_0002 | 0x0400_0003 => (Some(0x002), (addr & 1) as usize), // IF
+            0x0400_0200 | 0x0400_0201 => (Some(0x200), (addr & 1) as usize), // IE
+            0x0400_0202 | 0x0400_0203 => (Some(0x202), (addr & 1) as usize), // IF
             0x0400_0208 => (Some(0x208), 0), // IME
             _ => (None, 0),
         };

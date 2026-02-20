@@ -99,6 +99,10 @@ impl Gba {
             self.mem.interrupt.request(Interrupt::VBLANK);
         }
 
+        // Sync PPU state back to memory AFTER stepping, so DISPSTAT is up-to-date
+        // This is critical for ROMs that poll DISPSTAT in tight loops
+        self.sync_ppu_to_mem();
+
         self.apu.step(cycles);
         for timer in &mut self.timers {
             timer.step(cycles);

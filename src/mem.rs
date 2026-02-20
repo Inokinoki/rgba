@@ -167,6 +167,10 @@ pub struct Memory {
     // BIOS ROM (16KB) - read-only after boot
     bios: Vec<u8>,
 
+    // BIOS read return value (for addresses 0-3)
+    // On real GBA, reading from BIOS returns special values based on BIOS state
+    bios_read_return: u32,
+
     // On-board Work RAM (256KB) - 3 cycles
     wram: Box<[u8; 0x40000]>,
 
@@ -235,6 +239,10 @@ impl Memory {
 
         Self {
             bios,
+            // Initial BIOS read return value (address 0-3)
+            // Based on gba-tests/bios/bios.gba test expectations
+            // This value indicates "no BIOS function called yet" state
+            bios_read_return: 0xE129F000,
             wram: Box::new([0u8; 0x40000]),
             iwram: Box::new([0u8; 0x8000]),
             io: Box::new([0u8; 0x400]),
@@ -377,7 +385,16 @@ impl Memory {
         let (region, offset) = self.map_address(addr);
 
         match region {
-            MemoryRegion::Bios => self.bios[offset],
+            MemoryRegion::Bios => {
+                // On GBA, reading from BIOS addresses 0-3 returns special values
+                // based on BIOS state, not the actual BIOS code
+                if offset < 4 {
+                    // Return the appropriate byte from bios_read_return (little-endian)
+                    (self.bios_read_return >> (8 * offset)) as u8
+                } else {
+                    self.bios[offset]
+                }
+            }
             MemoryRegion::Wram => self.wram[offset],
             MemoryRegion::Iwram => self.iwram[offset],
             MemoryRegion::Io => self.read_io(addr),

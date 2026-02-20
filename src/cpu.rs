@@ -171,9 +171,9 @@ impl Cpu {
     }
 
     pub fn set_pc(&mut self, val: u32) {
+        // DEBUG: Log PC changes
+        eprintln!("set_pc: 0x{:08X} -> 0x{:08X}", self.r[15], val & 0xFFFFFFFC);
         self.r[15] = val & 0xFFFFFFFC; // Align to word
-        #[cfg(debug_assertions)]
-        eprintln!("set_pc: setting R15 to 0x{:08X}, flushing pipeline", self.r[15]);
         self.pipeline_loaded = false; // Flush pipeline when PC is explicitly set
     }
 
@@ -362,13 +362,9 @@ impl Cpu {
         let instruction_pc = self.pipeline_pc[0];
         let pc_at_execution = self.r[15];
 
-        #[cfg(debug_assertions)]
-        if instruction_pc >= 0x08000000 && instruction_pc <= 0x08000020 {
-            eprintln!("Executing instruction at PC=0x{:08X}, opcode=0x{:08X}", instruction_pc, opcode);
-            eprintln!("  Before shift: pipeline[0] = 0x{:08X} at 0x{:08X}", self.pipeline[0], self.pipeline_pc[0]);
-            eprintln!("  Before shift: pipeline[1] = 0x{:08X} at 0x{:08X}", self.pipeline[1], self.pipeline_pc[1]);
-            eprintln!("  Before shift: pipeline[2] = 0x{:08X} at 0x{:08X}", self.pipeline[2], self.pipeline_pc[2]);
-            eprintln!("  R15 = 0x{:08X}", self.r[15]);
+        // DEBUG: Log first few instructions
+        if instruction_pc >= 0x08000000 && instruction_pc <= 0x08000010 {
+            eprintln!("Executing: PC=0x{:08X}, opcode=0x{:08X}", instruction_pc, opcode);
         }
 
         self.pipeline[0] = self.pipeline[1];
@@ -378,7 +374,15 @@ impl Cpu {
         self.pipeline_pc[1] = self.pipeline_pc[2];
 
         // Decode and execute with instruction PC
+        let r15_before_exec = self.r[15];
         let cycles = self.execute_arm_with_pc(opcode, mem, instruction_pc, pc_at_execution);
+        let r15_after_exec = self.r[15];
+
+        // DEBUG: Log PC changes during execution
+        if r15_before_exec != r15_after_exec {
+            eprintln!("step_arm: PC changed during execution: 0x{:08X} -> 0x{:08X}, instr_pc=0x{:08X}",
+                     r15_before_exec, r15_after_exec, instruction_pc);
+        }
 
         // Only fetch next instruction if PC wasn't modified (branch, etc.)
         // Check if PC advanced by 4 from its value before execution
@@ -407,7 +411,9 @@ impl Cpu {
         if !self.check_condition(cond) {
             // Condition not met, skip this instruction
             // Still advance PC and take cycles
-            self.r[15] = self.r[15].wrapping_add(4);
+            eprintln!("DEBUG: Direct PC increment at line {}, before: 0x{:08X}", line!(), self.r[15]);
+        self.r[15] = self.r[15].wrapping_add(4);
+        eprintln!("DEBUG: Direct PC increment after: 0x{:08X}", self.r[15]);
             return 1;
         }
 
@@ -419,6 +425,11 @@ impl Cpu {
             0x0 => {
                 // Data processing / PSR transfer / Load-store halfword and signed byte
                 let bits_27_25 = (opcode >> 25) & 0x7;
+
+                // DEBUG: Log instructions with category 0x0
+                if opcode == 0xE0410001 {
+                    eprintln!("Category 0x0 instruction: opcode=0x{:08X}, bits_27_25=0b{:03b}", opcode, bits_27_25);
+                }
 
                 // Check for BX first (before other category 0x0 checks)
                 if (opcode & 0x0FFF_FFF0) == 0x012F_FF10 {
@@ -489,6 +500,12 @@ impl Cpu {
         let rn_val = self.r[rn];
         let op2_val = self.decode_operand2(operand2, i_bit);
 
+        // DEBUG: Log all data processing instructions
+        if rd == 0 && op == 0x2 {
+            eprintln!("DataProcessing: opcode=0x{:08X}, op=0b{:04b}({}), rd=R{}, s={}, rn_val=0x{:08X}, op2_val=0x{:08X}",
+                     opcode, op, op, rd, s, rn_val, op2_val);
+        }
+
         // Debug: track R12 modifications
         #[cfg(debug_assertions)]
         let r12_before = self.r[12];
@@ -515,11 +532,13 @@ impl Cpu {
                 let (result, overflow) = rn_val.overflowing_sub(op2_val);
                 self.r[rd] = result;
                 if s {
+                    eprintln!("SUBS: R{rd}=0x{:08X} ({}), result==0={}, setting flags", result, result, result == 0);
                     self.set_flag_n((result as i32) < 0);
                     self.set_flag_z(result == 0);
                     self.set_flag_c(!overflow);
                     self.set_flag_v(((rn_val as i32) < (op2_val as i32)) ^
                                     ((result as i32) < 0));
+                    eprintln!("SUBS: After setting flags, CPSR=0x{:08X}, Z={}", self.cpsr, (self.cpsr >> 30) & 1);
                 }
             }
             0x3 => {
@@ -646,7 +665,14 @@ impl Cpu {
                     self.set_thumb_mode(thumb);
                     return 1; // Return early - don't increment PC
                 } else {
+                    // DEBUG: Log MOV instructions
+                    if rd == 12 || op2_val == 1 {
+                        eprintln!("MOV R{rd} <- #{}, before: {}, opcode=0x{:08X}", op2_val, self.r[rd], opcode);
+                    }
                     self.r[rd] = op2_val;
+                    if rd == 12 || op2_val == 1 {
+                        eprintln!("MOV R{rd} <- #{}, after: {}", op2_val, self.r[rd]);
+                    }
                     if s {
                         self.set_flags_from_result(op2_val);
                     }
@@ -681,7 +707,9 @@ impl Cpu {
             return 1; // Return early - don't increment PC
         }
 
+        eprintln!("DEBUG: Direct PC increment at line {}, before: 0x{:08X}", line!(), self.r[15]);
         self.r[15] = self.r[15].wrapping_add(4);
+        eprintln!("DEBUG: Direct PC increment after: 0x{:08X}", self.r[15]);
 
         // Debug: check if R12 changed
         #[cfg(debug_assertions)]
@@ -812,7 +840,9 @@ impl Cpu {
             }
         }
 
+        eprintln!("DEBUG: Direct PC increment at line {}, before: 0x{:08X}", line!(), self.r[15]);
         self.r[15] = self.r[15].wrapping_add(4);
+        eprintln!("DEBUG: Direct PC increment after: 0x{:08X}", self.r[15]);
         1
     }
 
@@ -880,7 +910,9 @@ impl Cpu {
             self.r[rn] = final_addr;
         }
 
+        eprintln!("DEBUG: Direct PC increment at line {}, before: 0x{:08X}", line!(), self.r[15]);
         self.r[15] = self.r[15].wrapping_add(4);
+        eprintln!("DEBUG: Direct PC increment after: 0x{:08X}", self.r[15]);
         1
     }
 
@@ -951,7 +983,9 @@ impl Cpu {
             self.r[rn] = addr;
         }
 
+        eprintln!("DEBUG: Direct PC increment at line {}, before: 0x{:08X}", line!(), self.r[15]);
         self.r[15] = self.r[15].wrapping_add(4);
+        eprintln!("DEBUG: Direct PC increment after: 0x{:08X}", self.r[15]);
         2 // Memory access takes at least 2 cycles
     }
 
@@ -1014,7 +1048,9 @@ impl Cpu {
             }
         }
 
+        eprintln!("DEBUG: Direct PC increment at line {}, before: 0x{:08X}", line!(), self.r[15]);
         self.r[15] = self.r[15].wrapping_add(4);
+        eprintln!("DEBUG: Direct PC increment after: 0x{:08X}", self.r[15]);
         2
     }
 
@@ -1028,6 +1064,12 @@ impl Cpu {
         let load = ((opcode >> 20) & 1) != 0;  // L bit (1=load/LDM, 0=store/STM)
         let rn = ((opcode >> 16) & 0xF) as usize;  // Base register
         let reg_list = opcode & 0xFFFF;  // Bitmask of registers
+
+        // DEBUG: Log LDM/STM operations
+        if load {
+            eprintln!("LDM: opcode=0x{:08X}, reg_list=0x{:04X}, PC_in_list={}",
+                     opcode, reg_list, (reg_list & (1 << 15)) != 0);
+        }
 
         // Calculate start address
         let mut addr = self.r[rn];
@@ -1047,9 +1089,15 @@ impl Cpu {
                 if load {
                     // LDM: load from memory into register
                     let val = mem.read_word(addr);
+                    if reg_idx == 15 {
+                        eprintln!("LDM: Loading PC (R15) from address 0x{:08X}, value=0x{:08X}", addr, val);
+                    }
                     self.r[reg_idx] = val;
                 } else {
                     // STM: store register to memory
+                    if reg_idx == 14 {
+                        eprintln!("STM: Storing LR (R14) to address 0x{:08X}, value=0x{:08X}", addr, self.r[reg_idx]);
+                    }
                     mem.write_word(addr, self.r[reg_idx]);
                 }
                 addr = addr.wrapping_add(4);
@@ -1075,9 +1123,10 @@ impl Cpu {
         // Handle PC (R15) loading in LDM
         if load && (reg_list & (1 << 15)) != 0 {
             // When PC is loaded from LDM, switch mode based on bit 0
-            let pc_value = self.r[15];
+            // The value was already loaded into R15 in the loop above
+            let pc_value = self.r[15];  // This is the value just loaded from memory
             #[cfg(debug_assertions)]
-            eprintln!("LDM loading PC with value 0x{:08X}, R15 before=0x{:08X}", pc_value, self.r[15]);
+            eprintln!("LDM loading PC: loaded value=0x{:08X} from memory", pc_value);
             if pc_value & 1 != 0 {
                 // Bit 0 set: switch to Thumb mode
                 self.set_thumb_mode(true);
@@ -1092,7 +1141,9 @@ impl Cpu {
             return 3; // LDM with PC takes more cycles
         }
 
+        eprintln!("DEBUG: Direct PC increment at line {}, before: 0x{:08X}", line!(), self.r[15]);
         self.r[15] = self.r[15].wrapping_add(4);
+        eprintln!("DEBUG: Direct PC increment after: 0x{:08X}", self.r[15]);
         3 // Block data transfer takes 3+ cycles
     }
 
@@ -1115,11 +1166,9 @@ impl Cpu {
 
         let link = ((opcode >> 24) & 1) != 0;
 
-        #[cfg(debug_assertions)]
-        if instruction_pc >= 0x08000100 && instruction_pc <= 0x08000120 {
-            eprintln!("BRANCH: instruction_pc=0x{:08X}, opcode=0x{:08X}, link={}, offset={}, target_before_add=0x{:08X}",
-                     instruction_pc, opcode, link, offset, instruction_pc.wrapping_add(8));
-        }
+        // DEBUG: Log all branches
+        eprintln!("BRANCH: instruction_pc=0x{:08X}, opcode=0x{:08X}, link={}, offset={}, target=0x{:08X}",
+                 instruction_pc, opcode, link, offset, instruction_pc.wrapping_add(8).wrapping_add(offset as u32));
 
         // instruction_pc is the address of the instruction being executed
         // The branch offset is relative to this address
@@ -1349,7 +1398,8 @@ impl Cpu {
             }
             0b110 => {
                 // Category 6: Conditional branch, SWI, unconditional branch
-                if (opcode & 0xF800) == 0xE000 {
+                // Thumb conditional branches: 1101cccccccccccc (top 4 bits = 1101 = 0xD)
+                if (opcode & 0xF000) == 0xD000 {
                     self.thumb_branch_cond(opcode, instruction_pc)
                 } else if (opcode & 0xFF00) == 0xDF00 {
                     self.thumb_software_interrupt(mem)
@@ -2061,16 +2111,15 @@ impl Cpu {
 
     fn thumb_bl_prefix(&mut self, opcode: u16, instruction_pc: u32) -> u32 {
         // BL/BLX prefix: 11110Sxxxxxxxxxxx
-        // S: sign bit of offset
-        // imm10: bits 0-9 of offset (to be shifted left by 12)
+        // S: sign bit of offset (becomes bit 22 of final 23-bit offset)
+        // imm10: bits 0-9 of offset (become bits 21-12 of final offset)
         let s_bit = (opcode >> 10) & 1;
         let imm10 = (opcode & 0x3FF) as u32;
 
-        // Store partial offset in LR (high 11 bits + sign bit)
-        // Format: sign_bit (bit 22) | imm10 (bits 12-21, shifted by 12 in final calculation)
-        // We store it as: (sign_bit << 23) | (imm10 << 12)
-        // But we need to be careful about sign extension
-        let offset_high = ((s_bit as i32) << 23) | ((imm10 as i32) << 12);
+        // Store partial offset in LR
+        // We store s_bit at bit 22 (correct position for 23-bit offset)
+        // and imm10 at bits 12-21 (already in correct position)
+        let offset_high = ((s_bit as i32) << 22) | ((imm10 as i32) << 12);
         self.r[14] = offset_high as u32;
 
         // Advance to next instruction
@@ -2092,14 +2141,20 @@ impl Cpu {
         let offset_high = self.r[14] as i32;
 
         // Calculate full offset
-        // offset = (imm11 << 1) | (offset_high) | (s_bit2 << 22)
-        // The offset_high already has the sign bit at bit 23 and imm10 at bits 12-21
-        let offset_low = ((imm11 as i32) << 1) | ((s_bit2 as i32) << 22);
+        // BL offset encoding (23 bits total):
+        // - Bit 22: s_bit (from prefix)
+        // - Bits 21-12: imm10 (from prefix)
+        // - Bit 11: s_bit2 (from suffix)
+        // - Bits 10-0: imm11 << 1 (from suffix)
+        // offset_high has: s_bit at bit 23 (to become bit 22), imm10 at bits 12-21
+        // offset_low needs: s_bit2 at bit 11, imm11 at bits 0-10 (shifted left by 1)
+        let offset_low = ((imm11 as i32) << 1) | ((s_bit2 as i32) << 11);
         let mut offset = offset_high.wrapping_add(offset_low);
 
-        // Sign extend from 24 bits to 32 bits
-        if (offset & 0x800000) != 0 {
-            offset = offset | (-0x800000_i32);
+        // Sign extend from 23 bits to 32 bits
+        // The offset is a 23-bit signed value (bits 22-0)
+        if (offset & 0x400000) != 0 {
+            offset = offset | (-0x400000_i32);
         }
 
         // Save return address (PC of the next instruction after the suffix)

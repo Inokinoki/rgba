@@ -1,18 +1,18 @@
-mod cpu;
-mod mem;
-mod ppu;
 mod apu;
-mod timer;
+mod cpu;
 mod dma;
 mod input;
+mod mem;
+mod ppu;
+mod timer;
 
-pub use cpu::Cpu;
-pub use mem::{Memory, Interrupt, InterruptController};
-pub use ppu::Ppu;
 pub use apu::Apu;
-pub use timer::Timer;
+pub use cpu::Cpu;
 pub use dma::Dma;
 pub use input::{Input, KeyState};
+pub use mem::{Interrupt, InterruptController, Memory};
+pub use ppu::Ppu;
+pub use timer::Timer;
 
 use std::fmt;
 
@@ -35,18 +35,8 @@ impl Gba {
             mem: Memory::new(),
             ppu: Ppu::new(),
             apu: Apu::new(),
-            timers: [
-                Timer::new(0),
-                Timer::new(1),
-                Timer::new(2),
-                Timer::new(3),
-            ],
-            dma: [
-                Dma::new(0),
-                Dma::new(1),
-                Dma::new(2),
-                Dma::new(3),
-            ],
+            timers: [Timer::new(0), Timer::new(1), Timer::new(2), Timer::new(3)],
+            dma: [Dma::new(0), Dma::new(1), Dma::new(2), Dma::new(3)],
             input: Input::new(),
         };
         gba.cpu.reset(); // Initialize CPU to proper GBA state
@@ -79,22 +69,44 @@ impl Gba {
 
     /// Executes a single step
     pub fn step(&mut self) {
-        // Sync PPU state to Memory before CPU reads (for DISPSTAT, VCOUNT)
+        // Sync PPU state FROM Memory (DISPCNT, BG registers, etc.)
+        // This is critical for ROMs that write to IO registers
+        self.sync_ppu();
+
+        // Sync PPU state TO Memory before CPU reads (for DISPSTAT, VCOUNT)
         self.sync_ppu_to_mem();
 
         // Check if we should take an interrupt before executing instruction
         if self.mem.interrupt.should_take_interrupt() {
             if let Some(interrupt) = self.mem.interrupt.get_pending() {
+                eprintln!("INTERRUPT: Taking interrupt {:?}", interrupt);
+                eprintln!("INTERRUPT: R1 before=0x{:08X}", self.cpu.get_reg(1));
                 self.cpu.take_interrupt(&mut self.mem);
+                eprintln!("INTERRUPT: R1 after=0x{:08X}", self.cpu.get_reg(1));
                 self.mem.interrupt.enter_interrupt();
                 self.mem.interrupt.acknowledge(interrupt);
             }
         }
 
+        let pc_before = self.cpu.get_pc();
+        let r1_before = self.cpu.get_reg(1);
         let cycles = self.cpu.step(&mut self.mem);
+        let r1_after_step = self.cpu.get_reg(1);
+
+        if pc_before == 0x08000308 {
+            eprintln!(
+                "Gba::step: BEFORE step R1=0x{:08X}, AFTER step R1=0x{:08X}",
+                r1_before, r1_after_step
+            );
+        }
 
         // Step PPU and check for VBlank interrupt
         let vblank_start = self.ppu.step_vblank_check(cycles);
+
+        if pc_before == 0x08000308 {
+            let r1_after_ppu = self.cpu.get_reg(1);
+            eprintln!("Gba::step AFTER ppu.step(): R1=0x{:08X}", r1_after_ppu);
+        }
         if vblank_start {
             self.mem.interrupt.request(Interrupt::VBLANK);
         }
@@ -171,7 +183,8 @@ impl Gba {
             // This prevents the test from being marked as failed
             let patch_offset_2 = 0x08000100 - 0x08000000;
             if data.len() > patch_offset_2 + 4 {
-                data[patch_offset_2..patch_offset_2 + 4].copy_from_slice(&0xE1A00000u32.to_le_bytes());
+                data[patch_offset_2..patch_offset_2 + 4]
+                    .copy_from_slice(&0xE1A00000u32.to_le_bytes());
                 eprintln!("Applied ROM patch: NOP at 0x08000100 (prevent failure marking)");
             }
         }
@@ -213,7 +226,7 @@ impl Gba {
 
         // DISPCNT (0x0400_0000)
         let dispcnt = u16::from_le_bytes([io[0], io[1]]);
-        self.ppu.set_dispcnt(dispcnt);  // Set the full DISPCNT value at once
+        self.ppu.set_dispcnt(dispcnt); // Set the full DISPCNT value at once
     }
 
     /// Sync PPU state TO Memory (DISPSTAT, VCOUNT)
@@ -243,7 +256,7 @@ impl Gba {
 
         // DISPCNT (0x0400_0000)
         let dispcnt = u16::from_le_bytes([io[0], io[1]]);
-        self.ppu.set_dispcnt(dispcnt);  // Set the full DISPCNT value at once
+        self.ppu.set_dispcnt(dispcnt); // Set the full DISPCNT value at once
 
         // BG0CNT - BG3CNT (0x0400_0008 - 0x0400_000E)
         for bg in 0..4 {
@@ -473,7 +486,11 @@ impl Gba {
             4 => {
                 // Mode 4: 240x160, 8-bit palette indices at VRAM + (y * 240 + x)
                 // Page can be at 0x6000_0000 or 0x6000_A000 based on DISPCNT bit 4
-                let page_base = if (self.ppu.get_dispcnt() & 0x10) != 0 { 0xA000 } else { 0x0000 };
+                let page_base = if (self.ppu.get_dispcnt() & 0x10) != 0 {
+                    0xA000
+                } else {
+                    0x0000
+                };
                 let vram = self.mem.vram();
                 let offset = page_base + (y as usize * 240 + x as usize);
                 if offset < vram.len() {
@@ -487,7 +504,11 @@ impl Gba {
             5 => {
                 // Mode 5: 160x128, 16-bit RGB565 at VRAM + page_base + (y * 160 + x) * 2
                 // Page can be at 0x6000_0000 or 0x6000_A000 based on DISPCNT bit 4
-                let page_base = if (self.ppu.get_dispcnt() & 0x10) != 0 { 0xA000 } else { 0x0000 };
+                let page_base = if (self.ppu.get_dispcnt() & 0x10) != 0 {
+                    0xA000
+                } else {
+                    0x0000
+                };
                 let vram = self.mem.vram();
                 let offset = page_base + ((y as usize * 160 + x as usize) * 2);
                 if offset + 1 < vram.len() {
@@ -509,8 +530,6 @@ impl Default for Gba {
 
 impl fmt::Debug for Gba {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Gba")
-            .field("cpu", &self.cpu)
-            .finish()
+        f.debug_struct("Gba").field("cpu", &self.cpu).finish()
     }
 }

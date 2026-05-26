@@ -773,6 +773,11 @@ impl Memory {
         }
     }
 
+    /// Get a reference to the palette RAM
+    pub fn palette(&self) -> &[u8; 0x400] {
+        &self.palette
+    }
+
     /// Get a mutable reference to BIOS data (for font embedding)
     pub fn bios_mut(&mut self) -> &mut Vec<u8> {
         &mut self.bios

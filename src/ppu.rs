@@ -1149,6 +1149,111 @@ impl Ppu {
     }
 }
 
+/// Snapshot of PPU state for parallel rendering
+/// Contains all data needed to render a frame without accessing the original PPU
+#[derive(Clone)]
+pub struct PpuSnapshot {
+    pub vram: Box<[u8; 0x18000]>,
+    pub oam: Box<[u8; 0x400]>,
+    pub dispcnt: u16,
+    pub bgcnt: [u16; 4],
+    pub bg_hofs: [u16; 4],
+    pub bg_vofs: [u16; 4],
+    pub bldcnt: u16,
+    pub bldalpha: u16,
+    pub bldy: u16,
+    pub bg_mosaic: u16,
+    pub obj_mosaic: u16,
+    pub vcount: u16,
+}
+
+impl Ppu {
+    /// Create a snapshot of current PPU state for parallel rendering
+    pub fn snapshot(&self) -> PpuSnapshot {
+        PpuSnapshot {
+            vram: self.vram.clone(),
+            oam: self.oam.clone(),
+            dispcnt: self.dispcnt.bits(),
+            bgcnt: self.bgcnt,
+            bg_hofs: self.bg_hofs,
+            bg_vofs: self.bg_vofs,
+            bldcnt: self.bldcnt,
+            bldalpha: self.bldalpha,
+            bldy: self.bldy,
+            bg_mosaic: self.bg_mosaic,
+            obj_mosaic: self.obj_mosaic,
+            vcount: self.vcount,
+        }
+    }
+
+    /// Render a scanline from a snapshot (can be called from a separate thread)
+    pub fn render_scanline_from_snapshot(
+        snapshot: &PpuSnapshot,
+        scanline: u16,
+        framebuffer: &mut [u32],
+        palette: &[u8; 0x400],
+    ) {
+        if scanline >= 160 {
+            return;
+        }
+
+        let mode = (snapshot.dispcnt & 0x7) as u8;
+        let width = 240usize;
+        let y = scanline as usize;
+
+        for x in 0..width {
+            let color = match mode {
+                0 | 1 | 2 => {
+                    // Tile modes - simplified rendering
+                    Self::render_tile_pixel_from_snapshot(snapshot, x as u16, y as u16, palette)
+                }
+                3 => {
+                    // Mode 3: 16-bit bitmap
+                    let offset = (y * 240 + x) * 2;
+                    if offset + 1 < snapshot.vram.len() {
+                        u16::from_le_bytes([snapshot.vram[offset], snapshot.vram[offset + 1]])
+                    } else {
+                        0
+                    }
+                }
+                4 => {
+                    // Mode 4: 8-bit paletted
+                    let offset = y * 240 + x;
+                    if offset < snapshot.vram.len() {
+                        let idx = snapshot.vram[offset] as usize;
+                        let pal_offset = idx * 2;
+                        if pal_offset + 1 < palette.len() {
+                            u16::from_le_bytes([palette[pal_offset], palette[pal_offset + 1]])
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    }
+                }
+                _ => 0,
+            };
+
+            // Convert 15-bit color to 32-bit ARGB
+            let r = ((color & 0x1F) as u32 * 255 / 31) << 16;
+            let g = (((color >> 5) & 0x1F) as u32 * 255 / 31) << 8;
+            let b = ((color >> 10) & 0x1F) as u32 * 255 / 31;
+            framebuffer[x] = r | g | b;
+        }
+    }
+
+    fn render_tile_pixel_from_snapshot(
+        snapshot: &PpuSnapshot,
+        _x: u16,
+        _y: u16,
+        _palette: &[u8; 0x400],
+    ) -> u16 {
+        // Simplified tile rendering - just return 0 for now
+        // Full implementation would need to read tile data from snapshot.vram
+        0
+    }
+}
+
 impl Default for Ppu {
     fn default() -> Self {
         Self::new()

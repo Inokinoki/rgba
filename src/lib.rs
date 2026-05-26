@@ -425,6 +425,47 @@ impl Gba {
         }
     }
 
+    /// Run one frame with parallel PPU rendering
+    /// CPU executes next scanline while PPU renders previous scanline
+    pub fn run_frame_parallel(&mut self, framebuffer: &mut [u32]) {
+        use std::sync::mpsc;
+        use std::thread;
+
+        // Run 228 scanlines per frame (160 visible + 68 vblank)
+        for scanline in 0..228u16 {
+            // Create PPU snapshot for parallel rendering
+            let snapshot = self.ppu.snapshot();
+            let palette = *self.mem.palette();
+            let y = scanline;
+
+            // Spawn rendering thread for visible scanlines
+            let render_handle = if scanline < 160 {
+                let mut fb_slice = vec![0u32; 240];
+                let handle = thread::spawn(move || {
+                    Ppu::render_scanline_from_snapshot(&snapshot, y, &mut fb_slice, &palette);
+                    fb_slice
+                });
+                Some(handle)
+            } else {
+                None
+            };
+
+            // Execute CPU for this scanline (in parallel with PPU rendering)
+            self.run_scanline();
+
+            // Wait for PPU rendering to complete and copy to framebuffer
+            if let Some(handle) = render_handle {
+                if let Ok(scanline_fb) = handle.join() {
+                    let start = scanline as usize * 240;
+                    let end = start + 240;
+                    if end <= framebuffer.len() {
+                        framebuffer[start..end].copy_from_slice(&scanline_fb);
+                    }
+                }
+            }
+        }
+    }
+
     /// Loads a ROM into memory
     pub fn load_rom(&mut self, data: Vec<u8>) {
         self.mem.load_rom(data);

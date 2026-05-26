@@ -69,17 +69,6 @@ jobs:
         shell: bash
         timeout-minutes: 5
 
-      - name: Run gui examples (Linux only)
-        if: runner.os == 'Linux'
-        run: |
-          for ex in gui_emulator simple_gui_demo; do
-            echo "=== Running $ex ==="
-            xvfb-run cargo run --example "$ex" --features gui 2>&1 || true
-            echo ""
-          done
-        shell: bash
-        timeout-minutes: 2
-
   test:
     name: Run GBA tests
     runs-on: ${{ matrix.os }}

@@ -1,6 +1,8 @@
 mod apu;
 mod cpu;
 mod dma;
+mod eeprom;
+mod flash;
 mod input;
 mod mem;
 mod ppu;
@@ -9,12 +11,42 @@ mod timer;
 pub use apu::Apu;
 pub use cpu::Cpu;
 pub use dma::Dma;
+pub use eeprom::Eeprom;
+pub use flash::Flash;
 pub use input::{Input, KeyState};
-pub use mem::{Interrupt, InterruptController, Memory};
+pub use mem::{Interrupt, InterruptController, Memory, SaveType};
 pub use ppu::Ppu;
 pub use timer::Timer;
 
 use std::fmt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerType {
+    None,
+    Bg(usize),
+    Obj,
+}
+
+fn blend_alpha(c1: u16, c2: u16, eva: u32, evb: u32) -> u16 {
+    let r = (eva * (c1 & 0x1F) as u32 + evb * (c2 & 0x1F) as u32) >> 4;
+    let g = (eva * ((c1 >> 5) & 0x1F) as u32 + evb * ((c2 >> 5) & 0x1F) as u32) >> 4;
+    let b = (eva * ((c1 >> 10) & 0x1F) as u32 + evb * ((c2 >> 10) & 0x1F) as u32) >> 4;
+    r.min(31) as u16 | ((g.min(31) as u16) << 5) | ((b.min(31) as u16) << 10)
+}
+
+fn blend_brightness_up(c: u16, ey: u32) -> u16 {
+    let r = ((c & 0x1F) as u32 * (16 + ey)) >> 4;
+    let g = (((c >> 5) & 0x1F) as u32 * (16 + ey)) >> 4;
+    let b = (((c >> 10) & 0x1F) as u32 * (16 + ey)) >> 4;
+    r.min(31) as u16 | ((g.min(31) as u16) << 5) | ((b.min(31) as u16) << 10)
+}
+
+fn blend_brightness_down(c: u16, ey: u32) -> u16 {
+    let r = ((c & 0x1F) as u32 * (16 - ey)) >> 4;
+    let g = (((c >> 5) & 0x1F) as u32 * (16 - ey)) >> 4;
+    let b = (((c >> 10) & 0x1F) as u32 * (16 - ey)) >> 4;
+    r.min(31) as u16 | ((g.min(31) as u16) << 5) | ((b.min(31) as u16) << 10)
+}
 
 /// Represents the GBA console
 pub struct Gba {
@@ -40,7 +72,121 @@ impl Gba {
             input: Input::new(),
         };
         gba.cpu.reset(); // Initialize CPU to proper GBA state
+        gba.embed_bios_font();
         gba
+    }
+
+    /// Embed a GBA-compatible 8x8 1bpp font in BIOS at offset 0x1F78
+    /// The GBA BIOS stores a built-in character set here for system text rendering.
+    /// Format: 8 bytes per character, 1 bit per pixel, starting from ASCII 0x20 (space).
+    fn embed_bios_font(&mut self) {
+        // Minimal 8x8 font covering ASCII 0x20-0x7E (space to ~)
+        // Each character: 8 bytes, each byte = one row, bit 0 = leftmost pixel
+        const FONT: &[u8] = &[
+            // 0x20 ' '
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x21 '!'
+            0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x00, // 0x22 '"'
+            0x6C, 0x6C, 0x6C, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x23 '#'
+            0x6C, 0x6C, 0xFE, 0x6C, 0xFE, 0x6C, 0x6C, 0x00, // 0x24 '$'
+            0x18, 0x3E, 0x60, 0x3C, 0x06, 0x7C, 0x18, 0x00, // 0x25 '%'
+            0x00, 0xC6, 0xCC, 0x18, 0x30, 0x66, 0xC6, 0x00, // 0x26 '&'
+            0x38, 0x6C, 0x38, 0x76, 0xDC, 0xCC, 0x76, 0x00, // 0x27 '''
+            0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x28 '('
+            0x0C, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0C, 0x00, // 0x29 ')'
+            0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x18, 0x30, 0x00, // 0x2A '*'
+            0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00, // 0x2B '+'
+            0x00, 0x18, 0x18, 0x7E, 0x18, 0x18, 0x00, 0x00, // 0x2C ','
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30, // 0x2D '-'
+            0x00, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x00, 0x00, // 0x2E '.'
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00, // 0x2F '/'
+            0x06, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0x80, 0x00, // 0x30 '0'
+            0x7C, 0xC6, 0xCE, 0xD6, 0xE6, 0xC6, 0x7C, 0x00, // 0x31 '1'
+            0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00, // 0x32 '2'
+            0x7C, 0xC6, 0x06, 0x1C, 0x30, 0x66, 0xFE, 0x00, // 0x33 '3'
+            0x7C, 0xC6, 0x06, 0x3C, 0x06, 0xC6, 0x7C, 0x00, // 0x34 '4'
+            0x1C, 0x3C, 0x6C, 0xCC, 0xFE, 0x0C, 0x1E, 0x00, // 0x35 '5'
+            0xFE, 0xC0, 0xFC, 0x06, 0x06, 0xC6, 0x7C, 0x00, // 0x36 '6'
+            0x38, 0x60, 0xC0, 0xFC, 0xC6, 0xC6, 0x7C, 0x00, // 0x37 '7'
+            0xFE, 0xC6, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x00, // 0x38 '8'
+            0x7C, 0xC6, 0xC6, 0x7C, 0xC6, 0xC6, 0x7C, 0x00, // 0x39 '9'
+            0x7C, 0xC6, 0xC6, 0x7E, 0x06, 0x0C, 0x78, 0x00, // 0x3A ':'
+            0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x00, // 0x3B ';'
+            0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x30, // 0x3C '<'
+            0x06, 0x0C, 0x18, 0x30, 0x18, 0x0C, 0x06, 0x00, // 0x3D '='
+            0x00, 0x00, 0x7E, 0x00, 0x7E, 0x00, 0x00, 0x00, // 0x3E '>'
+            0x60, 0x30, 0x18, 0x0C, 0x18, 0x30, 0x60, 0x00, // 0x3F '?'
+            0x7C, 0xC6, 0x0C, 0x18, 0x18, 0x00, 0x18, 0x00, // 0x40 '@'
+            0x7C, 0xC6, 0xDE, 0xDE, 0xDE, 0xC0, 0x78, 0x00, // 0x41 'A'
+            0x38, 0x6C, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0x00, // 0x42 'B'
+            0xFC, 0x66, 0x66, 0x7C, 0x66, 0x66, 0xFC, 0x00, // 0x43 'C'
+            0x3C, 0x66, 0xC0, 0xC0, 0xC0, 0x66, 0x3C, 0x00, // 0x44 'D'
+            0xF8, 0x6C, 0x66, 0x66, 0x66, 0x6C, 0xF8, 0x00, // 0x45 'E'
+            0xFE, 0x62, 0x68, 0x78, 0x68, 0x62, 0xFE, 0x00, // 0x46 'F'
+            0xFE, 0x62, 0x68, 0x78, 0x68, 0x60, 0xF0, 0x00, // 0x47 'G'
+            0x3C, 0x66, 0xC0, 0xC0, 0xCE, 0x66, 0x3E, 0x00, // 0x48 'H'
+            0xC6, 0xC6, 0xC6, 0xFE, 0xC6, 0xC6, 0xC6, 0x00, // 0x49 'I'
+            0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, // 0x4A 'J'
+            0x1E, 0x0C, 0x0C, 0x0C, 0xCC, 0xCC, 0x78, 0x00, // 0x4B 'K'
+            0xE6, 0x66, 0x6C, 0x78, 0x6C, 0x66, 0xE6, 0x00, // 0x4C 'L'
+            0xF0, 0x60, 0x60, 0x60, 0x62, 0x66, 0xFE, 0x00, // 0x4D 'M'
+            0xC6, 0xEE, 0xFE, 0xFE, 0xD6, 0xC6, 0xC6, 0x00, // 0x4E 'N'
+            0xC6, 0xE6, 0xF6, 0xDE, 0xCE, 0xC6, 0xC6, 0x00, // 0x4F 'O'
+            0x7C, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, // 0x50 'P'
+            0xFC, 0x66, 0x66, 0x7C, 0x60, 0x60, 0xF0, 0x00, // 0x51 'Q'
+            0x7C, 0xC6, 0xC6, 0xC6, 0xD6, 0xDE, 0x7C, 0x06, // 0x52 'R'
+            0xFC, 0x66, 0x66, 0x7C, 0x6C, 0x66, 0xE6, 0x00, // 0x53 'S'
+            0x7C, 0xC6, 0x60, 0x38, 0x0C, 0xC6, 0x7C, 0x00, // 0x54 'T'
+            0x7E, 0x7E, 0x5A, 0x18, 0x18, 0x18, 0x3C, 0x00, // 0x55 'U'
+            0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, // 0x56 'V'
+            0xC6, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x10, 0x00, // 0x57 'W'
+            0xC6, 0xC6, 0xD6, 0xFE, 0xFE, 0xEE, 0xC6, 0x00, // 0x58 'X'
+            0xC6, 0xC6, 0x6C, 0x38, 0x6C, 0xC6, 0xC6, 0x00, // 0x59 'Y'
+            0x66, 0x66, 0x66, 0x3C, 0x18, 0x18, 0x3C, 0x00, // 0x5A 'Z'
+            0xFE, 0xC6, 0x8C, 0x18, 0x32, 0x66, 0xFE, 0x00, // 0x5B '['
+            0x3C, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3C, 0x00, // 0x5C '\'
+            0xC0, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x02, 0x00, // 0x5D ']'
+            0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00, // 0x5E '^'
+            0x10, 0x38, 0x6C, 0xC6, 0x00, 0x00, 0x00, 0x00, // 0x5F '_'
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, // 0x60 '`'
+            0x30, 0x18, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x61 'a'
+            0x00, 0x00, 0x78, 0x0C, 0x7C, 0xCC, 0x76, 0x00, // 0x62 'b'
+            0xE0, 0x60, 0x7C, 0x66, 0x66, 0x66, 0xDC, 0x00, // 0x63 'c'
+            0x00, 0x00, 0x7C, 0xC6, 0xC0, 0xC6, 0x7C, 0x00, // 0x64 'd'
+            0x1C, 0x0C, 0x7C, 0xCC, 0xCC, 0xCC, 0x76, 0x00, // 0x65 'e'
+            0x00, 0x00, 0x7C, 0xC6, 0xFE, 0xC0, 0x7C, 0x00, // 0x66 'f'
+            0x38, 0x6C, 0x60, 0xF8, 0x60, 0x60, 0xF0, 0x00, // 0x67 'g'
+            0x00, 0x00, 0x76, 0xCC, 0xCC, 0x7C, 0x0C, 0xF8, // 0x68 'h'
+            0xE0, 0x60, 0x6C, 0x76, 0x66, 0x66, 0xE6, 0x00, // 0x69 'i'
+            0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3C, 0x00, // 0x6A 'j'
+            0x06, 0x00, 0x06, 0x06, 0x06, 0x66, 0x66, 0x3C, // 0x6B 'k'
+            0xE0, 0x60, 0x66, 0x6C, 0x78, 0x6C, 0xE6, 0x00, // 0x6C 'l'
+            0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, // 0x6D 'm'
+            0x00, 0x00, 0xEC, 0xFE, 0xD6, 0xD6, 0xD6, 0x00, // 0x6E 'n'
+            0x00, 0x00, 0xDC, 0x66, 0x66, 0x66, 0x66, 0x00, // 0x6F 'o'
+            0x00, 0x00, 0x7C, 0xC6, 0xC6, 0xC6, 0x7C, 0x00, // 0x70 'p'
+            0x00, 0x00, 0xDC, 0x66, 0x66, 0x7C, 0x60, 0xF0, // 0x71 'q'
+            0x00, 0x00, 0x76, 0xCC, 0xCC, 0x7C, 0x0C, 0x1E, // 0x72 'r'
+            0x00, 0x00, 0xDC, 0x76, 0x60, 0x60, 0xF0, 0x00, // 0x73 's'
+            0x00, 0x00, 0x7E, 0xC0, 0x7C, 0x06, 0xFC, 0x00, // 0x74 't'
+            0x30, 0x30, 0xFC, 0x30, 0x30, 0x36, 0x1C, 0x00, // 0x75 'u'
+            0x00, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0x76, 0x00, // 0x76 'v'
+            0x00, 0x00, 0xC6, 0xC6, 0xC6, 0x6C, 0x38, 0x00, // 0x77 'w'
+            0x00, 0x00, 0xC6, 0xD6, 0xD6, 0xFE, 0x6C, 0x00, // 0x78 'x'
+            0x00, 0x00, 0xC6, 0x6C, 0x38, 0x6C, 0xC6, 0x00, // 0x79 'y'
+            0x00, 0x00, 0xC6, 0xC6, 0xCE, 0x76, 0x06, 0xFC, // 0x7A 'z'
+            0x00, 0x00, 0xFC, 0x98, 0x30, 0x64, 0xFC, 0x00, // 0x7B '{'
+            0x0E, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0E, 0x00, // 0x7C '|'
+            0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00, // 0x7D '}'
+            0x70, 0x18, 0x18, 0x0E, 0x18, 0x18, 0x70, 0x00, // 0x7E '~'
+            0x76, 0xDC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        // Write font data to BIOS at offset 0x1F78
+        let bios = self.mem.bios_mut();
+        let offset = 0x1F78;
+        if bios.len() >= offset + FONT.len() {
+            bios[offset..offset + FONT.len()].copy_from_slice(FONT);
+        }
     }
 
     /// Resets the GBA to its initial state
@@ -69,6 +215,12 @@ impl Gba {
 
     /// Executes a single step
     pub fn step(&mut self) {
+        // Sync IO registers to component state
+        self.sync_io_to_components();
+
+        // Sync input state to memory (KEYINPUT register)
+        self.sync_input_to_mem();
+
         // Sync PPU state FROM Memory (DISPCNT, BG registers, etc.)
         // This is critical for ROMs that write to IO registers
         self.sync_ppu();
@@ -76,48 +228,91 @@ impl Gba {
         // Sync PPU state TO Memory before CPU reads (for DISPSTAT, VCOUNT)
         self.sync_ppu_to_mem();
 
-        // Check if we should take an interrupt before executing instruction
+        // Check for HALT state - if halt was requested, enter halted mode
+        if self.mem.halt_pending {
+            self.cpu.set_halted();
+            self.mem.halt_pending = false;
+        }
+
+        // Check if we should take an interrupt
         if self.mem.interrupt.should_take_interrupt() {
+            // Wake CPU from HALT state on interrupt
+            if self.cpu.is_halted() {
+                self.cpu.clear_halted();
+            }
             if let Some(interrupt) = self.mem.interrupt.get_pending() {
-                eprintln!("INTERRUPT: Taking interrupt {:?}", interrupt);
-                eprintln!("INTERRUPT: R1 before=0x{:08X}", self.cpu.get_reg(1));
                 self.cpu.take_interrupt(&mut self.mem);
-                eprintln!("INTERRUPT: R1 after=0x{:08X}", self.cpu.get_reg(1));
                 self.mem.interrupt.enter_interrupt();
                 self.mem.interrupt.acknowledge(interrupt);
             }
         }
 
-        let pc_before = self.cpu.get_pc();
-        let r1_before = self.cpu.get_reg(1);
-        let cycles = self.cpu.step(&mut self.mem);
-        let r1_after_step = self.cpu.get_reg(1);
+        let cycles = if self.cpu.is_halted() {
+            // CPU is halted - skip execution but still step peripherals
+            1
+        } else {
+            self.cpu.step(&mut self.mem)
+        };
 
-        if pc_before == 0x08000308 {
-            eprintln!(
-                "Gba::step: BEFORE step R1=0x{:08X}, AFTER step R1=0x{:08X}",
-                r1_before, r1_after_step
-            );
-        }
-
-        // Step PPU and check for VBlank interrupt
-        let vblank_start = self.ppu.step_vblank_check(cycles);
-
-        if pc_before == 0x08000308 {
-            let r1_after_ppu = self.cpu.get_reg(1);
-            eprintln!("Gba::step AFTER ppu.step(): R1=0x{:08X}", r1_after_ppu);
-        }
+        // Step PPU and check for VBlank/HBlank interrupts
+        let (vblank_start, hblank_start) = self.ppu.step_vblank_check(cycles);
         if vblank_start {
             self.mem.interrupt.request(Interrupt::VBLANK);
+        }
+        if hblank_start {
+            self.mem.interrupt.request(Interrupt::HBLANK);
         }
 
         // Sync PPU state back to memory AFTER stepping, so DISPSTAT is up-to-date
         // This is critical for ROMs that poll DISPSTAT in tight loops
         self.sync_ppu_to_mem();
 
+        // Execute DMA transfers
+        for i in 0..4 {
+            if self.dma[i].is_active() && self.dma[i].is_enabled() {
+                use crate::dma::DmaTransferMode;
+                let trigger = self.dma[i].get_trigger();
+                let should_execute = match trigger {
+                    DmaTransferMode::Immediate => true,
+                    DmaTransferMode::VBlank => self.ppu.is_in_vblank(),
+                    DmaTransferMode::HBlank => self.ppu.is_in_hblank() && !self.ppu.is_in_vblank(),
+                    DmaTransferMode::Special => false,
+                };
+
+                if should_execute {
+                    let irq = self.dma[i].execute(&mut self.mem);
+                    if irq {
+                        self.mem.interrupt.request(match i {
+                            0 => Interrupt::DMA0,
+                            1 => Interrupt::DMA1,
+                            2 => Interrupt::DMA2,
+                            3 => Interrupt::DMA3,
+                            _ => unreachable!(),
+                        });
+                    }
+                }
+            }
+        }
+
         self.apu.step(cycles);
-        for timer in &mut self.timers {
-            timer.step(cycles);
+        for i in 0..4 {
+            self.timers[i].step(cycles);
+            if self.timers[i].did_overflow() {
+                // Trigger count-up for next timer
+                if i < 3 {
+                    self.timers[i + 1].trigger_count_up();
+                }
+                // Request interrupt if enabled
+                if self.timers[i].is_irq_enabled() {
+                    self.mem.interrupt.request(match i {
+                        0 => Interrupt::TIMER0,
+                        1 => Interrupt::TIMER1,
+                        2 => Interrupt::TIMER2,
+                        3 => Interrupt::TIMER3,
+                        _ => unreachable!(),
+                    });
+                }
+            }
         }
     }
 
@@ -176,7 +371,6 @@ impl Gba {
             if data.len() > patch_offset + 4 {
                 // Replace with NOP (MOV R0, R0)
                 data[patch_offset..patch_offset + 4].copy_from_slice(&0xE1A00000u32.to_le_bytes());
-                eprintln!("Applied ROM patch: NOP at 0x080000F8 (bypassing TEQ check)");
             }
 
             // Also patch the MOV R12, #1 at 0x08000100 to NOP
@@ -185,7 +379,6 @@ impl Gba {
             if data.len() > patch_offset_2 + 4 {
                 data[patch_offset_2..patch_offset_2 + 4]
                     .copy_from_slice(&0xE1A00000u32.to_le_bytes());
-                eprintln!("Applied ROM patch: NOP at 0x08000100 (prevent failure marking)");
             }
         }
 
@@ -205,6 +398,16 @@ impl Gba {
         Ok(())
     }
 
+    /// Set the cartridge save type
+    pub fn set_save_type(&mut self, save_type: SaveType) {
+        self.mem.set_save_type(save_type);
+    }
+
+    /// Get the current save type
+    pub fn save_type(&self) -> SaveType {
+        self.mem.save_type()
+    }
+
     /// Get a reference to the PPU
     pub fn ppu(&self) -> &Ppu {
         &self.ppu
@@ -215,18 +418,48 @@ impl Gba {
         &mut self.ppu
     }
 
+    /// Sync input state to Memory IO registers (KEYINPUT)
+    fn sync_input_to_mem(&mut self) {
+        let key_val = self.input.get_key_register();
+        let io = self.mem.io_mut();
+        io[0x130] = (key_val & 0xFF) as u8;
+        io[0x131] = ((key_val >> 8) & 0xFF) as u8;
+    }
+
     /// Sync PPU state from Memory (IO registers and VRAM)
     /// This must be called before rendering to get the latest state
     pub fn sync_ppu(&mut self) {
-        // Sync VRAM
         self.ppu.sync_vram(self.mem.vram());
+        self.ppu.sync_oam(self.mem.oam());
 
-        // Sync IO registers
         let io = self.mem.io();
 
-        // DISPCNT (0x0400_0000)
-        let dispcnt = u16::from_le_bytes([io[0], io[1]]);
-        self.ppu.set_dispcnt(dispcnt); // Set the full DISPCNT value at once
+        self.ppu.set_dispcnt(u16::from_le_bytes([io[0], io[1]]));
+
+        for bg in 0..4 {
+            let off = 8 + bg * 2;
+            self.ppu
+                .set_bgcnt(bg, u16::from_le_bytes([io[off], io[off + 1]]));
+        }
+
+        for bg in 0..4 {
+            let h_off = 16 + bg * 4;
+            let v_off = h_off + 2;
+            self.ppu
+                .set_bg_hofs(bg, u16::from_le_bytes([io[h_off], io[h_off + 1]]) & 0x1FF);
+            self.ppu
+                .set_bg_vofs(bg, u16::from_le_bytes([io[v_off], io[v_off + 1]]) & 0x1FF);
+        }
+
+        self.ppu
+            .set_blend_control(u16::from_le_bytes([io[0x50], io[0x51]]));
+        self.ppu
+            .set_blend_alpha(u16::from_le_bytes([io[0x52], io[0x53]]));
+        self.ppu
+            .set_blend_brightness(u16::from_le_bytes([io[0x54], io[0x55]]));
+
+        self.ppu.bg_mosaic = u16::from_le_bytes([io[0x4C], io[0x4D]]);
+        self.ppu.obj_mosaic = u16::from_le_bytes([io[0x4E], io[0x4F]]);
     }
 
     /// Sync PPU state TO Memory (DISPSTAT, VCOUNT)
@@ -243,6 +476,48 @@ impl Gba {
         let vcount = self.ppu.get_vcount();
         io[0x06] = (vcount & 0xFF) as u8;
         io[0x07] = ((vcount >> 8) & 0xFF) as u8;
+    }
+
+    /// Sync IO register writes to component state (timers, DMA)
+    fn sync_io_to_components(&mut self) {
+        let io = self.mem.io();
+
+        // Timer 0-3: TM0CNT_L/H (0x100-0x10F)
+        for i in 0..4 {
+            let base = 0x100 + (i * 4);
+            let control = u16::from_le_bytes([io[base + 2], io[base + 3]]);
+            let reload = u16::from_le_bytes([io[base], io[base + 1]]);
+
+            self.timers[i].set_control(control);
+            self.timers[i].set_reload(reload);
+        }
+
+        // DMA 0-3: DMASAD, DMADAD, DMACNT_L, DMACNT_H
+        for i in 0..4 {
+            let base = 0xB0 + (i * 12);
+            let src = u32::from_le_bytes([io[base], io[base + 1], io[base + 2], io[base + 3]]);
+            let dst = u32::from_le_bytes([io[base + 4], io[base + 5], io[base + 6], io[base + 7]]);
+            let count = u16::from_le_bytes([io[base + 8], io[base + 9]]);
+            let control = u16::from_le_bytes([io[base + 10], io[base + 11]]);
+
+            self.dma[i].set_src_addr(src);
+            self.dma[i].set_dst_addr(dst);
+            self.dma[i].set_count(count);
+            self.dma[i].set_control(control);
+        }
+
+        // Blending registers
+        // BLDCNT (0x0400_0050) - 2 bytes at offset 0x50
+        let bldcnt = u16::from_le_bytes([io[0x50], io[0x51]]);
+        self.ppu.set_blend_control(bldcnt);
+
+        // BLDALPHA (0x0400_0052) - 2 bytes at offset 0x52
+        let bldalpha = u16::from_le_bytes([io[0x52], io[0x53]]);
+        self.ppu.set_blend_alpha(bldalpha);
+
+        // BLDY (0x0400_0054) - 2 bytes at offset 0x54
+        let bldy = u16::from_le_bytes([io[0x54], io[0x55]]);
+        self.ppu.set_blend_brightness(bldy);
     }
 
     /// Sync PPU state from Memory (full)
@@ -357,124 +632,57 @@ impl Gba {
     }
 
     /// Get pixel color for tile/text modes (0, 1, 2)
-    /// Returns RGB555 color value
+    /// Returns RGB555 color value with full compositing, blending, and sprite effects
     pub fn get_pixel_tile_mode(&self, x: u16, y: u16) -> u16 {
         let ppu = &self.ppu;
         let mode = ppu.get_display_mode();
+        let dispcnt = ppu.get_dispcnt();
 
         match mode {
             0 | 1 | 2 => {
-                // Tile/text modes - render backgrounds from lowest to highest priority
-                let mut color = 0; // Default: transparent (black)
+                let win_vis = ppu.get_window_visibility(x, y);
 
-                // Check each background layer (BG0-BG3)
+                let mut first_color = 0u16;
+                let mut first_type = LayerType::None;
+                let mut first_priority = 5u8;
+                let mut second_color = 0u16;
+
                 for bg in 0..4 {
-                    if ppu.is_bg_enabled(bg) {
-                        // Get BG control register
-                        let bgcnt = ppu.get_bgcnt(bg);
-                        let priority = ppu.get_bg_priority(bg);
-
-                        // Background size encoding
-                        let bg_size = (bgcnt >> 14) & 0x3;
-
-                        // Get dimensions based on size and mode
-                        let (width, height) = match (mode, bg_size) {
-                            // Regular BG (BG0, BG1 in modes 0, 1)
-                            (_, 0) => (256u16, 256u16),
-                            (_, 1) => (512u16, 256u16),
-                            (_, 2) => (256u16, 512u16),
-                            (_, 3) => (512u16, 512u16),
-                            _ => (256u16, 256u16),
-                        };
-
-                        // Affine BG (BG2, BG3 in mode 2) use different dimensions
-                        let (width, height) = if mode == 2 && (bg == 2 || bg == 3) {
-                            match bg_size {
-                                0 => (128u16, 128u16),
-                                1 => (256u16, 256u16),
-                                2 => (512u16, 512u16),
-                                3 => (1024u16, 1024u16),
-                                _ => (128u16, 128u16),
-                            }
-                        } else {
-                            (width, height)
-                        };
-
-                        // Apply scroll offset
-                        let hofs = ppu.get_bg_hofs(bg);
-                        let vofs = ppu.get_bg_vofs(bg);
-                        let bg_x = ((x as u32 + hofs as u32) % width as u32) as u16;
-                        let bg_y = ((y as u32 + vofs as u32) % height as u32) as u16;
-
-                        // Get tile coordinates
-                        let tile_x = bg_x / 8;
-                        let tile_y = bg_y / 8;
-                        let pixel_x = bg_x % 8;
-                        let pixel_y = bg_y % 8;
-
-                        // Get screen entry (tile map entry)
-                        let screen_base = ppu.get_bg_map_base(bg) as usize;
-                        let entry = ppu.get_screen_entry(
-                            screen_base,
-                            tile_x,
-                            tile_y,
-                            bg_size,
-                            width / 8,
-                            height / 8,
-                        );
-
-                        // Parse screen entry
-                        let (tile_num, flip_h, flip_v, palette_num, _priority) =
-                            Ppu::parse_screen_entry(entry);
-
-                        // Check if 8bpp or 4bpp
-                        let is_8bpp = (bgcnt & 0x80) != 0;
-
-                        // Get tile data
-                        let tile_base = ppu.get_bg_tile_base(bg) as usize;
-
-                        let color_index = if is_8bpp {
-                            ppu.get_tile_pixel_8bpp(
-                                tile_base,
-                                tile_num,
-                                pixel_x as u8,
-                                pixel_y as u8,
-                                flip_h,
-                                flip_v,
-                            )
-                        } else {
-                            ppu.get_tile_pixel_4bpp(
-                                tile_base,
-                                tile_num,
-                                pixel_x as u8,
-                                pixel_y as u8,
-                                palette_num,
-                                flip_h,
-                                flip_v,
-                            )
-                        };
-
-                        // If not transparent (0), use this color
-                        if color_index != 0 {
-                            // Get actual palette color
-                            let pal_index = if is_8bpp {
-                                color_index as u16
-                            } else {
-                                (palette_num * 16) + color_index as u16
-                            };
-                            color = self.get_palette_color(0, pal_index);
-
-                            // For now, take the first non-transparent pixel
-                            // In a full implementation, we'd layer by priority
-                            return color;
+                    if ppu.is_bg_enabled(bg) && (win_vis & (1 << bg)) != 0 {
+                        let priority = ppu.get_bg_priority(bg) as u8;
+                        if priority >= first_priority {
+                            continue;
+                        }
+                        if let Some(color) = self.get_bg_pixel(ppu, mode, bg, x, y) {
+                            second_color = first_color;
+                            first_color = color;
+                            first_type = LayerType::Bg(bg);
+                            first_priority = priority;
                         }
                     }
                 }
 
-                color
+                if dispcnt & (1 << 12) != 0 && (win_vis & (1 << 4)) != 0 {
+                    if let Some((color, priority)) = self.get_sprite_pixel(ppu, x, y) {
+                        if priority < first_priority {
+                            second_color = first_color;
+                            first_color = color;
+                            first_type = LayerType::Obj;
+                            first_priority = priority;
+                        } else if first_type == LayerType::None {
+                            first_color = color;
+                            first_type = LayerType::Obj;
+                        }
+                    }
+                }
+
+                if first_type != LayerType::None {
+                    self.apply_pixel_blending(ppu, first_color, second_color, first_type, win_vis)
+                } else {
+                    first_color
+                }
             }
             3 => {
-                // Mode 3: 240x160, 16-bit RGB565 at VRAM + (y * 240 + x) * 2
                 let vram = self.mem.vram();
                 let offset = ((y as usize * 240 + x as usize) * 2) as usize;
                 if offset + 1 < vram.len() {
@@ -484,8 +692,6 @@ impl Gba {
                 }
             }
             4 => {
-                // Mode 4: 240x160, 8-bit palette indices at VRAM + (y * 240 + x)
-                // Page can be at 0x6000_0000 or 0x6000_A000 based on DISPCNT bit 4
                 let page_base = if (self.ppu.get_dispcnt() & 0x10) != 0 {
                     0xA000
                 } else {
@@ -495,15 +701,12 @@ impl Gba {
                 let offset = page_base + (y as usize * 240 + x as usize);
                 if offset < vram.len() {
                     let color_index = vram[offset] as u16;
-                    // Look up in palette
                     self.get_palette_color(0, color_index)
                 } else {
                     0
                 }
             }
             5 => {
-                // Mode 5: 160x128, 16-bit RGB565 at VRAM + page_base + (y * 160 + x) * 2
-                // Page can be at 0x6000_0000 or 0x6000_A000 based on DISPCNT bit 4
                 let page_base = if (self.ppu.get_dispcnt() & 0x10) != 0 {
                     0xA000
                 } else {
@@ -517,7 +720,268 @@ impl Gba {
                     0
                 }
             }
-            _ => 0, // Other modes handled elsewhere
+            _ => 0,
+        }
+    }
+
+    fn get_bg_pixel(&self, ppu: &Ppu, mode: u8, bg: usize, x: u16, y: u16) -> Option<u16> {
+        let bgcnt = ppu.get_bgcnt(bg);
+        let bg_size = (bgcnt >> 14) & 0x3;
+
+        let (width, height) = match (mode, bg_size) {
+            (_, 0) => (256u16, 256u16),
+            (_, 1) => (512u16, 256u16),
+            (_, 2) => (256u16, 512u16),
+            (_, 3) => (512u16, 512u16),
+            _ => (256u16, 256u16),
+        };
+
+        let (width, height) = if mode == 2 && (bg == 2 || bg == 3) {
+            match bg_size {
+                0 => (128u16, 128u16),
+                1 => (256u16, 256u16),
+                2 => (512u16, 512u16),
+                3 => (1024u16, 1024u16),
+                _ => (128u16, 128u16),
+            }
+        } else {
+            (width, height)
+        };
+
+        let is_affine = (mode == 1 && bg == 2) || (mode == 2 && (bg == 2 || bg == 3));
+
+        let (bg_x, bg_y) = if is_affine {
+            let pa = ppu.get_bg_affine_a(bg) as i32;
+            let pb = ppu.get_bg_affine_b(bg) as i32;
+            let pc = ppu.get_bg_affine_c(bg) as i32;
+            let pd = ppu.get_bg_affine_d(bg) as i32;
+            let io = self.mem.io();
+            let (ref_x_addr, ref_y_addr) = if bg == 2 {
+                (0x28usize, 0x2Cusize)
+            } else {
+                (0x38usize, 0x3Cusize)
+            };
+            let ref_x_raw = u32::from_le_bytes([
+                io[ref_x_addr],
+                io[ref_x_addr + 1],
+                io[ref_x_addr + 2],
+                io[ref_x_addr + 3],
+            ]);
+            let ref_y_raw = u32::from_le_bytes([
+                io[ref_y_addr],
+                io[ref_y_addr + 1],
+                io[ref_y_addr + 2],
+                io[ref_y_addr + 3],
+            ]);
+            let ref_x = ((ref_x_raw as i32) << 4) >> 4;
+            let ref_y = ((ref_y_raw as i32) << 4) >> 4;
+            let tx = (pa * x as i32 + pb * y as i32 + ref_x) >> 8;
+            let ty = (pc * x as i32 + pd * y as i32 + ref_y) >> 8;
+            let tx = ((tx % width as i32) + width as i32) as u16 % width;
+            let ty = ((ty % height as i32) + height as i32) as u16 % height;
+            (tx, ty)
+        } else {
+            let hofs = ppu.get_bg_hofs(bg);
+            let vofs = ppu.get_bg_vofs(bg);
+            (
+                ((x as u32 + hofs as u32) % width as u32) as u16,
+                ((y as u32 + vofs as u32) % height as u32) as u16,
+            )
+        };
+
+        let (bg_x, bg_y) = ppu.apply_bg_mosaic(bg_x, bg_y);
+        let tile_x = bg_x / 8;
+        let tile_y = bg_y / 8;
+        let pixel_x = bg_x % 8;
+        let pixel_y = bg_y % 8;
+        let screen_base = ppu.get_bg_map_base(bg) as usize;
+        let entry =
+            ppu.get_screen_entry(screen_base, tile_x, tile_y, bg_size, width / 8, height / 8);
+        let (tile_num, flip_h, flip_v, palette_num, _) = Ppu::parse_screen_entry(entry);
+        let is_8bpp = (bgcnt & 0x80) != 0;
+        let tile_base = ppu.get_bg_tile_base(bg) as usize;
+
+        let color_index = if is_8bpp {
+            ppu.get_tile_pixel_8bpp(
+                tile_base,
+                tile_num,
+                pixel_x as u8,
+                pixel_y as u8,
+                flip_h,
+                flip_v,
+            )
+        } else {
+            ppu.get_tile_pixel_4bpp(
+                tile_base,
+                tile_num,
+                pixel_x as u8,
+                pixel_y as u8,
+                palette_num,
+                flip_h,
+                flip_v,
+            )
+        };
+
+        if color_index != 0 {
+            let pal_index = if is_8bpp {
+                color_index as u16
+            } else {
+                (palette_num * 16) + color_index as u16
+            };
+            Some(self.get_palette_color(0, pal_index))
+        } else {
+            None
+        }
+    }
+
+    /// Get sprite pixel at (x, y) with priority, handling affine and mosaic
+    fn get_sprite_pixel(&self, ppu: &Ppu, x: u16, y: u16) -> Option<(u16, u8)> {
+        for sprite in 0..128 {
+            if !ppu.sprite_is_enabled(sprite) || ppu.sprite_is_window(sprite) {
+                continue;
+            }
+
+            let prio = ppu.sprite_priority(sprite) as u8;
+            let (w, h) = ppu.sprite_dimensions(sprite);
+            let is_affine = ppu.sprite_is_affine(sprite);
+            let double_size = ppu.sprite_double_size(sprite);
+            let (render_w, render_h) = if is_affine && double_size {
+                (w * 2, h * 2)
+            } else {
+                (w, h)
+            };
+
+            let sx = ppu.sprite_x(sprite);
+            let sy = ppu.sprite_y(sprite);
+            let dx = x as i32 - sx;
+            let dy = y as i32 - sy;
+            if dx < 0 || dx >= render_w as i32 || dy < 0 || dy >= render_h as i32 {
+                continue;
+            }
+
+            let is_256 = ppu.sprite_is_256color(sprite);
+            let tile_num = ppu.sprite_tile(sprite);
+            let palette = ppu.sprite_palette(sprite);
+
+            let (px, py) = if is_affine {
+                let group = ppu.sprite_rotation_param(sprite);
+                let pa = ppu.sprite_affine_pa(group) as i32;
+                let pb = ppu.sprite_affine_pb(group) as i32;
+                let pc = ppu.sprite_affine_pc(group) as i32;
+                let pd = ppu.sprite_affine_pd(group) as i32;
+                let cx = render_w as i32 / 2;
+                let cy = render_h as i32 / 2;
+                let rx = dx - cx;
+                let ry = dy - cy;
+                let tx = ((pa * rx + pb * ry) >> 8) + w as i32 / 2;
+                let ty = ((pc * rx + pd * ry) >> 8) + h as i32 / 2;
+                if tx < 0 || tx >= w as i32 || ty < 0 || ty >= h as i32 {
+                    continue;
+                }
+                (tx as u16, ty as u16)
+            } else {
+                let mut px = dx as u16;
+                let mut py = dy as u16;
+                if ppu.sprite_flip_h(sprite) {
+                    px = w - 1 - px;
+                }
+                if ppu.sprite_flip_v(sprite) {
+                    py = h - 1 - py;
+                }
+                (px, py)
+            };
+
+            let tile_x = px / 8;
+            let tile_y = py / 8;
+            let pixel_x = (px % 8) as u8;
+            let pixel_y = (py % 8) as u8;
+            let actual_tile = if is_256 {
+                tile_num + tile_y * (w / 8) + tile_x
+            } else {
+                tile_num + tile_y * (w / 8) * 2 + tile_x * 2
+            };
+            let color_index =
+                ppu.get_obj_tile_pixel(actual_tile, pixel_x, pixel_y, palette, is_256);
+            if color_index == 0 {
+                continue;
+            }
+
+            let pal_index = if is_256 {
+                color_index as u16
+            } else {
+                (palette * 16) + color_index as u16
+            };
+            let color = self.get_palette_color(1, pal_index);
+            return Some((color, prio));
+        }
+        None
+    }
+
+    fn apply_pixel_blending(
+        &self,
+        ppu: &Ppu,
+        first: u16,
+        second: u16,
+        first_type: LayerType,
+        _win_vis: u16,
+    ) -> u16 {
+        let bldcnt = ppu.get_blend_control();
+        let blend_mode = ppu.get_blend_mode();
+
+        if blend_mode == 0 {
+            return first;
+        }
+
+        let is_first_target = match first_type {
+            LayerType::Bg(bg) => (bldcnt & (1 << bg)) != 0,
+            LayerType::Obj => (bldcnt & (1 << 4)) != 0,
+            LayerType::None => false,
+        };
+
+        if !is_first_target {
+            return first;
+        }
+
+        match blend_mode {
+            1 => {
+                let eva = (ppu.get_blend_alpha() & 0x1F).min(16) as u32;
+                let evb = ((ppu.get_blend_alpha() >> 8) & 0x1F).min(16) as u32;
+                let is_second_target = (bldcnt & (0x1F << 8)) != 0;
+                let blended_second = if is_second_target { second } else { 0 };
+                blend_alpha(first, blended_second, eva, evb)
+            }
+            2 => {
+                let ey = (ppu.get_blend_brightness() & 0x1F).min(16) as u32;
+                blend_brightness_up(first, ey)
+            }
+            3 => {
+                let ey = (ppu.get_blend_brightness() & 0x1F).min(16) as u32;
+                blend_brightness_down(first, ey)
+            }
+            _ => first,
+        }
+    }
+
+    /// Apply special effects (alpha blending, brightness) - kept for compatibility
+    pub fn apply_blending(&self, color1: u16, color2: u16) -> u16 {
+        let ppu = &self.ppu;
+        let mode = ppu.get_blend_mode();
+
+        match mode {
+            1 => {
+                let eva = (ppu.get_blend_alpha() & 0x1F).min(16) as u32;
+                let evb = ((ppu.get_blend_alpha() >> 8) & 0x1F).min(16) as u32;
+                blend_alpha(color1, color2, eva, evb)
+            }
+            2 => {
+                let ey = (ppu.get_blend_brightness() & 0x1F).min(16) as u32;
+                blend_brightness_up(color1, ey)
+            }
+            3 => {
+                let ey = (ppu.get_blend_brightness() & 0x1F).min(16) as u32;
+                blend_brightness_down(color1, ey)
+            }
+            _ => color1,
         }
     }
 }

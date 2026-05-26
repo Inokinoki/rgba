@@ -4,12 +4,13 @@ A GBA emulator written in Rust following **Behavior Driven Development (BDD)** p
 
 ## Project Status
 
-**ACTIVE DEVELOPMENT** 🔄 - Core features implemented, undergoing ROM testing
+**ACTIVE DEVELOPMENT** - Core features implemented, GBA test suite fully passing
 
 - ✅ Complete CPU (ARM + Thumb instruction sets)
 - ✅ Complete timing, DMA, and audio systems
 - ✅ ARM LDM/STM (Load/Store Multiple) instructions implemented
-- 🔄 GBA ROM test suite integration (Ralph Loop: 306 iterations)
+- ✅ Interrupt handling with BIOS ISR dispatch
+- ✅ GBA ROM test suite: **13/13 tests passing** (PPU, CPU, Memory, BIOS, Save, NES)
 - ✅ Optional GUI application included
 - ✅ Ready for ROM loading and execution
 
@@ -203,6 +204,25 @@ tests/
 └── integration.rs       # Cross-component integration tests
 ```
 
+### GBA ROM Test Results
+
+| Category | Test | Status |
+|----------|------|--------|
+| PPU | shades.gba | ✅ |
+| PPU | stripes.gba | ✅ |
+| PPU | hello.gba | ✅ |
+| CPU | arm.gba | ✅ |
+| CPU | thumb.gba | ✅ |
+| Memory | memory.gba | ✅ |
+| Memory | unsafe.gba | ✅ |
+| BIOS | bios.gba | ✅ |
+| Save | none.gba | ✅ |
+| Save | sram.gba | ✅ |
+| Save | flash64.gba | ✅ |
+| Save | flash128.gba | ✅ |
+| NES | nes.gba | ✅ |
+| **Total** | **13/13** | **100%** |
+
 ### Test Results Summary
 
 | Component | Passing | Total |
@@ -223,20 +243,15 @@ tests/
 
 ### Remaining Work
 1. **PPU**
-   - Complete sprite rendering (currently stub)
-   - Implement mosaic effect processing
-   - Add alpha blending calculations
+   - Cycle-accurate scanline rendering (per-scanline buffer instead of per-pixel)
+   - Sprite rendering optimization (pre-sort visible sprites per scanline)
 
-2. **Interrupts**
-   - Implement interrupt handling
-   - Add HALT instruction
-
-3. **Debugging Tools**
+2. **Debugging Tools**
    - Add disassembler
    - Implement instruction logging
    - Add memory viewer
 
-4. **Performance**
+3. **Performance**
    - Cycle-accurate timing refinement
    - JIT compilation for performance
 

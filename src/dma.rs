@@ -31,8 +31,8 @@ pub struct Dma {
     enabled: bool,
     transfer_type: DmaTransferType,
     repeat: bool,
-    src_increment: i8,  // -1, 0, or 1
-    dst_increment: i8,  // -1, 0, or 1
+    src_increment: i8, // -1, 0, or 1
+    dst_increment: i8, // -1, 0, or 1
     trigger: DmaTransferMode,
     irq: bool,
     active: bool,

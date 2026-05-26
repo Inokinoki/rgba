@@ -55,7 +55,7 @@ impl Timer {
         }
 
         // Apply prescaler
-        let prescaler = 1 << self.prescaler_shift;
+        let _prescaler = 1 << self.prescaler_shift;
         let scaled_cycles = cycles >> self.prescaler_shift;
 
         if scaled_cycles == 0 {
@@ -69,7 +69,8 @@ impl Timer {
         if overflow || (new_counter < old_counter && scaled_cycles > 0) {
             // Timer overflowed
             self.counter = self.reload;
-            let remaining = (scaled_cycles as u16).wrapping_sub(0xFFFF_u16.wrapping_sub(old_counter));
+            let remaining =
+                (scaled_cycles as u16).wrapping_sub(0xFFFF_u16.wrapping_sub(old_counter));
             self.counter = self.counter.wrapping_add(remaining);
             self.overflow_pending = true;
         } else {

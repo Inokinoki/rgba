@@ -322,6 +322,7 @@ impl Gba {
     /// Run one scanline (1232 cycles) - batch execution for better performance
     pub fn run_scanline(&mut self) {
         const SCANLINE_CYCLES: u32 = 1232;
+        const BATCH_SIZE: u32 = 16; // Step peripherals every 16 cycles
         let mut cycles_remaining = SCANLINE_CYCLES;
 
         // Sync once at start of scanline
@@ -330,34 +331,41 @@ impl Gba {
         self.sync_ppu();
         self.sync_ppu_to_mem();
 
-        // Inner loop: CPU + PPU + timers (must step together for correct timing)
         while cycles_remaining > 0 {
-            if self.mem.halt_pending {
-                self.cpu.set_halted();
-                self.mem.halt_pending = false;
+            // Run CPU for BATCH_SIZE cycles before stepping peripherals
+            let batch_cycles = cycles_remaining.min(BATCH_SIZE);
+            let mut cpu_cycles_used: u32 = 0;
+
+            while cpu_cycles_used < batch_cycles {
+                if self.mem.halt_pending {
+                    self.cpu.set_halted();
+                    self.mem.halt_pending = false;
+                }
+
+                if self.mem.interrupt.should_take_interrupt() {
+                    if self.cpu.is_halted() {
+                        self.cpu.clear_halted();
+                    }
+                    if let Some(interrupt) = self.mem.interrupt.get_pending() {
+                        self.cpu.take_interrupt(&mut self.mem);
+                        self.mem.interrupt.enter_interrupt();
+                        self.mem.interrupt.acknowledge(interrupt);
+                    }
+                }
+
+                let cycles = if self.cpu.is_halted() {
+                    1
+                } else {
+                    self.cpu.step(&mut self.mem)
+                };
+
+                cpu_cycles_used += cycles;
             }
 
-            if self.mem.interrupt.should_take_interrupt() {
-                if self.cpu.is_halted() {
-                    self.cpu.clear_halted();
-                }
-                if let Some(interrupt) = self.mem.interrupt.get_pending() {
-                    self.cpu.take_interrupt(&mut self.mem);
-                    self.mem.interrupt.enter_interrupt();
-                    self.mem.interrupt.acknowledge(interrupt);
-                }
-            }
+            cycles_remaining = cycles_remaining.saturating_sub(batch_cycles);
 
-            let cycles = if self.cpu.is_halted() {
-                1
-            } else {
-                self.cpu.step(&mut self.mem)
-            };
-
-            cycles_remaining = cycles_remaining.saturating_sub(cycles);
-
-            // Step PPU and check for VBlank/HBlank interrupts
-            let (vblank_start, hblank_start) = self.ppu.step_vblank_check(cycles);
+            // Step peripherals by batch_cycles
+            let (vblank_start, hblank_start) = self.ppu.step_vblank_check(batch_cycles);
             if vblank_start {
                 self.mem.interrupt.request(Interrupt::VBLANK);
             }
@@ -365,9 +373,8 @@ impl Gba {
                 self.mem.interrupt.request(Interrupt::HBLANK);
             }
 
-            // Step timers
             for i in 0..4 {
-                self.timers[i].step(cycles);
+                self.timers[i].step(batch_cycles);
                 if self.timers[i].did_overflow() {
                     if i < 3 {
                         self.timers[i + 1].trigger_count_up();
@@ -384,8 +391,7 @@ impl Gba {
                 }
             }
 
-            // Step APU
-            self.apu.step(cycles);
+            self.apu.step(batch_cycles);
         }
 
         // Sync PPU state back to memory at end of scanline

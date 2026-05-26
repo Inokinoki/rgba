@@ -217,6 +217,14 @@ pub struct Memory {
     // HALT state - set when writing to HALTCNT (0x0400_0301)
     pub halt_pending: bool,
 
+    // Dirty flags for lazy synchronization
+    pub vram_dirty: bool,
+    pub oam_dirty: bool,
+    pub palette_dirty: bool,
+    pub io_ppu_dirty: bool,
+    pub io_timer_dirty: bool,
+    pub io_dma_dirty: bool,
+
     // Save type configuration and backends
     save_type: SaveType,
     flash: Option<Flash>,
@@ -278,6 +286,12 @@ impl Memory {
             waitcnt: 0x0000,
             interrupt: InterruptController::new(),
             halt_pending: false,
+            vram_dirty: true,
+            oam_dirty: true,
+            palette_dirty: true,
+            io_ppu_dirty: true,
+            io_timer_dirty: true,
+            io_dma_dirty: true,
             save_type: SaveType::None,
             flash: None,
             eeprom: None,

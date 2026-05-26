@@ -319,6 +319,114 @@ impl Gba {
         }
     }
 
+    /// Run one scanline (1232 cycles) - batch execution for better performance
+    /// This reduces function call overhead from 280k calls/frame to ~228 calls/frame
+    pub fn run_scanline(&mut self) {
+        // One scanline = 1232 cycles (240 pixels × 4 cycles + hblank)
+        const SCANLINE_CYCLES: u32 = 1232;
+        let mut cycles_remaining = SCANLINE_CYCLES;
+
+        // Sync once at start of scanline
+        self.sync_io_to_components();
+        self.sync_input_to_mem();
+        self.sync_ppu();
+        self.sync_ppu_to_mem();
+
+        while cycles_remaining > 0 {
+            // Check for HALT state
+            if self.mem.halt_pending {
+                self.cpu.set_halted();
+                self.mem.halt_pending = false;
+            }
+
+            // Check if we should take an interrupt
+            if self.mem.interrupt.should_take_interrupt() {
+                if self.cpu.is_halted() {
+                    self.cpu.clear_halted();
+                }
+                if let Some(interrupt) = self.mem.interrupt.get_pending() {
+                    self.cpu.take_interrupt(&mut self.mem);
+                    self.mem.interrupt.enter_interrupt();
+                    self.mem.interrupt.acknowledge(interrupt);
+                }
+            }
+
+            let cycles = if self.cpu.is_halted() {
+                1
+            } else {
+                self.cpu.step(&mut self.mem)
+            };
+
+            cycles_remaining = cycles_remaining.saturating_sub(cycles);
+
+            // Step PPU and check for VBlank/HBlank interrupts
+            let (vblank_start, hblank_start) = self.ppu.step_vblank_check(cycles);
+            if vblank_start {
+                self.mem.interrupt.request(Interrupt::VBLANK);
+            }
+            if hblank_start {
+                self.mem.interrupt.request(Interrupt::HBLANK);
+            }
+
+            self.apu.step(cycles);
+            for i in 0..4 {
+                self.timers[i].step(cycles);
+                if self.timers[i].did_overflow() {
+                    if i < 3 {
+                        self.timers[i + 1].trigger_count_up();
+                    }
+                    if self.timers[i].is_irq_enabled() {
+                        self.mem.interrupt.request(match i {
+                            0 => Interrupt::TIMER0,
+                            1 => Interrupt::TIMER1,
+                            2 => Interrupt::TIMER2,
+                            3 => Interrupt::TIMER3,
+                            _ => unreachable!(),
+                        });
+                    }
+                }
+            }
+
+            // Check dirty flags - if CPU wrote to IO/VRAM/OAM, sync mid-scanline
+            if self.mem.io_ppu_dirty || self.mem.vram_dirty || self.mem.oam_dirty {
+                self.sync_ppu();
+            }
+            if self.mem.io_timer_dirty || self.mem.io_dma_dirty {
+                self.sync_io_to_components();
+            }
+        }
+
+        // Sync PPU state back to memory at end of scanline
+        self.sync_ppu_to_mem();
+
+        // Execute DMA transfers at end of scanline
+        for i in 0..4 {
+            if self.dma[i].is_active() && self.dma[i].is_enabled() {
+                use crate::dma::DmaTransferMode;
+                let trigger = self.dma[i].get_trigger();
+                let should_execute = match trigger {
+                    DmaTransferMode::Immediate => true,
+                    DmaTransferMode::VBlank => self.ppu.is_in_vblank(),
+                    DmaTransferMode::HBlank => self.ppu.is_in_hblank() && !self.ppu.is_in_vblank(),
+                    DmaTransferMode::Special => false,
+                };
+
+                if should_execute {
+                    let irq = self.dma[i].execute(&mut self.mem);
+                    if irq {
+                        self.mem.interrupt.request(match i {
+                            0 => Interrupt::DMA0,
+                            1 => Interrupt::DMA1,
+                            2 => Interrupt::DMA2,
+                            3 => Interrupt::DMA3,
+                            _ => unreachable!(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     /// Loads a ROM into memory
     pub fn load_rom(&mut self, data: Vec<u8>) {
         self.mem.load_rom(data);

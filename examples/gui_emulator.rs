@@ -211,10 +211,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Run emulation
         if is_running {
-            // Run enough cycles for PPU to render a full frame
-            // GBA frame = ~280k cycles (16.78 MHz / 60 FPS)
-            for _ in 0..280_000 {
-                gba.step();
+            // Run one frame = 228 scanlines (160 visible + 68 vblank)
+            for _ in 0..228 {
+                gba.run_scanline();
             }
         }
 

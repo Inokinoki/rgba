@@ -100,26 +100,15 @@ fn main() {
         println!("  BG{}: enabled, priority {}", bg, bg);
     }
 
-    // Sprite system
-    println!();
-    println!("Sprite System");
-    println!("-------------");
-
-    // Configure a few sprites
-    for i in 0..8 {
-        gba.ppu.set_sprite_enabled(i, true);
-        gba.ppu.set_sprite_x(i, 50 + (i * 20) as u16);
-        gba.ppu.set_sprite_y(i, 80);
-        gba.ppu.set_sprite_tile(i, i as u16);
-        gba.ppu.set_sprite_priority(i, 2);
-        println!("  Sprite {}: x={}, y={}, tile={}", i, 50 + i * 20, 80, i);
-    }
-
     // Display timing information
     println!();
     println!("Display Timing");
     println!("--------------");
-    println!("  Resolution: {}x{}", gba.ppu.get_width(), gba.ppu.get_height());
+    println!(
+        "  Resolution: {}x{}",
+        gba.ppu.get_width(),
+        gba.ppu.get_height()
+    );
     println!("  VCOUNT: {}", gba.ppu.get_vcount());
     println!("  In VBlank: {}", gba.ppu.is_in_vblank());
     println!("  In HBlank: {}", gba.ppu.is_in_hblank());

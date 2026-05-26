@@ -10,27 +10,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
 
-    let (rom_path, bios_path) = if args.len() > 1 {
+    let (rom_path, bios_path, max_frames) = {
         let mut rom_idx = 1;
         let mut bios_idx = None;
+        let mut frames = None;
 
-        // Check for --bios argument
+        // Check for --bios and --frames arguments
         for (i, arg) in args.iter().enumerate() {
             if arg == "--bios" && i + 1 < args.len() {
                 bios_idx = Some(i + 1);
                 if rom_idx == i || rom_idx == i + 1 {
                     rom_idx = i + 2;
                 }
-                break;
+            }
+            if arg == "--frames" && i + 1 < args.len() {
+                frames = args[i + 1].parse::<u32>().ok();
+                if rom_idx == i || rom_idx == i + 1 {
+                    rom_idx = i + 2;
+                }
             }
         }
 
         let bios_path = bios_idx.map(|idx| args[idx].as_str());
-        let rom_path = if rom_idx < args.len() { Some(args[rom_idx].as_str()) } else { None };
+        let rom_path = if rom_idx < args.len() {
+            Some(args[rom_idx].as_str())
+        } else {
+            None
+        };
 
-        (rom_path, bios_path)
-    } else {
-        (None, None)
+        (rom_path, bios_path, frames)
     };
 
     if rom_path.is_none() {
@@ -92,15 +100,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let window_height = height * scale;
 
     // Create window
-    let title = format!("RGBA GBA Emulator - {}",
+    let title = format!(
+        "RGBA GBA Emulator - {}",
         rom_path.unwrap_or(&"No ROM".to_string()).clone()
     );
     let mut window = minifb::Window::new(
         &title,
         window_width,
         window_height,
-        minifb::WindowOptions::default()
-    ).unwrap_or_else(|e| {
+        minifb::WindowOptions::default(),
+    )
+    .unwrap_or_else(|e| {
         eprintln!("Failed to create window: {}", e);
         std::process::exit(1);
     });
@@ -115,16 +125,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut fps_counter = 0;
     let mut last_time = std::time::Instant::now();
     let mut fps = 0;
+    let mut frame_count: u32 = 0;
 
     // Main loop
     while window.is_open() && !window.is_key_down(minifb::Key::Escape) {
+        // Check frame limit
+        if let Some(max) = max_frames {
+            if frame_count >= max {
+                println!("Reached {} frames, exiting.", max);
+                break;
+            }
+        }
+        frame_count += 1;
         // Update FPS counter
         fps_counter += 1;
         if last_time.elapsed() >= Duration::from_secs(1) {
             fps = fps_counter;
             fps_counter = 0;
             last_time = std::time::Instant::now();
-            let title = format!("RGBA GBA Emulator - {} FPS - {}",
+            let title = format!(
+                "RGBA GBA Emulator - {} FPS - {}",
                 fps,
                 rom_path.unwrap_or(&"No ROM".to_string()).clone()
             );
@@ -191,13 +211,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Run emulation
         if is_running {
-            // Run one frame (approximately 2800 steps for 60 FPS)
-            for _ in 0..2800 {
+            // Run enough cycles for PPU to render a full frame
+            // GBA frame = ~280k cycles (16.78 MHz / 60 FPS)
+            for _ in 0..280_000 {
                 gba.step();
             }
         }
 
-        // Sync PPU state from Memory before rendering
+        // Sync PPU state from Memory after frame completes
         gba.sync_ppu();
 
         // Render the screen
@@ -213,9 +234,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let r = ((c >> 0) & 0x1F) as u8;
                         let g = ((c >> 5) & 0x1F) as u8;
                         let b = ((c >> 10) & 0x1F) as u8;
-                        ((r as u32 * 255 / 31) << 16) |
-                        ((g as u32 * 255 / 31) << 8) |
-                        (b as u32 * 255 / 31)
+                        ((r as u32 * 255 / 31) << 16)
+                            | ((g as u32 * 255 / 31) << 8)
+                            | (b as u32 * 255 / 31)
                     }
                     3 => {
                         // Mode 3: 16-bit bitmap
@@ -223,9 +244,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let r = ((c >> 0) & 0x1F) as u8;
                         let g = ((c >> 5) & 0x1F) as u8;
                         let b = ((c >> 10) & 0x1F) as u8;
-                        ((r as u32 * 255 / 31) << 16) |
-                        ((g as u32 * 255 / 31) << 8) |
-                        (b as u32 * 255 / 31)
+                        ((r as u32 * 255 / 31) << 16)
+                            | ((g as u32 * 255 / 31) << 8)
+                            | (b as u32 * 255 / 31)
                     }
                     4 => {
                         // Mode 4: 8-bit paletted
@@ -235,9 +256,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let r = ((c >> 0) & 0x1F) as u8;
                         let g = ((c >> 5) & 0x1F) as u8;
                         let b = ((c >> 10) & 0x1F) as u8;
-                        ((r as u32 * 255 / 31) << 16) |
-                        ((g as u32 * 255 / 31) << 8) |
-                        (b as u32 * 255 / 31)
+                        ((r as u32 * 255 / 31) << 16)
+                            | ((g as u32 * 255 / 31) << 8)
+                            | (b as u32 * 255 / 31)
                     }
                     _ => {
                         // Test pattern for unsupported modes
@@ -253,6 +274,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Update window
         window.update_with_buffer(&buffer, width, height).unwrap();
+    }
+
+    // Verification: check ROM execution
+    if rom_path.is_some() {
+        let pc = gba.cpu().get_pc();
+        let r12 = gba.cpu().get_reg(12);
+        let non_zero_pixels = buffer.iter().filter(|&&p| p != 0).count();
+
+        println!("Verification:");
+        println!("  PC: 0x{:08X}", pc);
+        println!("  R12: {}", r12);
+        println!("  Non-zero pixels: {}/{}", non_zero_pixels, width * height);
+        println!("  Frames rendered: {}", frame_count);
+
+        if pc == 0 {
+            eprintln!("FAIL: PC is 0, ROM not executing");
+            std::process::exit(1);
+        }
+        if non_zero_pixels == 0 {
+            eprintln!("FAIL: framebuffer is blank, no rendering happened");
+            std::process::exit(1);
+        }
+        println!("PASS: ROM executed and rendered {} frames", frame_count);
     }
 
     Ok(())

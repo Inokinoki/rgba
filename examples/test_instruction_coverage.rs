@@ -7,11 +7,15 @@ fn main() {
     println!();
 
     let tests = [
-        ("arm.gba", "/tmp/gba-tests/arm/arm.gba", "ARM Instructions"),
-        ("thumb.gba", "/tmp/gba-tests/thumb/thumb.gba", "Thumb Instructions"),
-        ("memory.gba", "/tmp/gba-tests/memory/memory.gba", "Memory System"),
-        ("bios.gba", "/tmp/gba-tests/bios/bios.gba", "BIOS Calls"),
-        ("unsafe.gba", "/tmp/gba-tests/unsafe/unsafe.gba", "Edge Cases"),
+        ("arm.gba", "gba-tests/arm/arm.gba", "ARM Instructions"),
+        (
+            "thumb.gba",
+            "gba-tests/thumb/thumb.gba",
+            "Thumb Instructions",
+        ),
+        ("memory.gba", "gba-tests/memory/memory.gba", "Memory System"),
+        ("bios.gba", "gba-tests/bios/bios.gba", "BIOS Calls"),
+        ("unsafe.gba", "gba-tests/unsafe/unsafe.gba", "Edge Cases"),
     ];
 
     const MAX_STEPS: usize = 500_000;
@@ -54,9 +58,15 @@ fn main() {
         } else {
             println!("❌ FAIL");
             if let Some(step) = failed_at_step {
-                println!("                       Test {} failed at step {}", failed_test_num, step);
+                println!(
+                    "                       Test {} failed at step {}",
+                    failed_test_num, step
+                );
             }
-            println!("                       Final PC: 0x{:08X}, R12: {}", final_pc, final_r12);
+            println!(
+                "                       Final PC: 0x{:08X}, R12: {}",
+                final_pc, final_r12
+            );
         }
     }
 
@@ -66,7 +76,9 @@ fn main() {
     println!("═══════════════════════════════════════════════════════");
     println!();
     println!("ARM Instructions:");
-    println!("  ✅ Conditional execution (EQ, NE, CS, CC, MI, PL, VS, VC, HI, LS, GE, LT, GT, LE, AL)");
+    println!(
+        "  ✅ Conditional execution (EQ, NE, CS, CC, MI, PL, VS, VC, HI, LS, GE, LT, GT, LE, AL)"
+    );
     println!("  ✅ Branches (B, BL, BX)");
     println!("  ✅ Data processing (MOV, MVN, ADD, SUB, RSB, ADC, SBC, AND, ORR, EOR, BIC)");
     println!("  ✅ Comparisons (CMP, CMN, TST, TEQ)");

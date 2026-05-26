@@ -2,9 +2,21 @@ name: GBA Tests
 
 on:
   push:
-    branches: [master, feat/*]
+    paths:
+      - 'src/**'
+      - 'examples/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/**'
   pull_request:
-    branches: [master]
+    paths:
+      - 'src/**'
+      - 'examples/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/**'
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,7 +24,71 @@ env:
   GBA_TESTS_SHA: a7113b6
 
 jobs:
+  examples:
+    name: Build & run examples
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      - name: Build all examples
+        run: cargo build --examples
+        shell: bash
+
+      - name: Build examples with gui feature
+        run: cargo build --examples --features gui
+        shell: bash
+
+      - name: Clone gba-tests
+        run: git clone ${{ env.GBA_TESTS_REPO }} gba-tests && cd gba-tests && git checkout ${{ env.GBA_TESTS_SHA }}
+        shell: bash
+
+      - name: Install xvfb (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb libxkbcommon-dev
+        shell: bash
+
+      - name: Run self-contained examples
+        run: |
+          for ex in cpu_test memory_test quick_start input_demo graphics_demo; do
+            echo "=== Running $ex ==="
+            cargo run --example "$ex" || exit 1
+            echo ""
+          done
+        shell: bash
+        timeout-minutes: 5
+
+      - name: Run gui examples
+        run: |
+          echo "=== Running gui_emulator ==="
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run cargo run --release --example gui_emulator --features gui -- --frames 60 gba-tests/ppu/hello.gba || exit 1
+          else
+            cargo run --release --example gui_emulator --features gui -- --frames 60 gba-tests/ppu/hello.gba || exit 1
+          fi
+          echo ""
+          echo "=== Running simple_gui_demo ==="
+          cargo run --release --example simple_gui_demo || exit 1
+        shell: bash
+        timeout-minutes: 2
+
   test:
+    name: Run GBA tests
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -64,6 +140,16 @@ jobs:
             exit 1
           fi
         shell: bash
+
+      - name: Run ROM-dependent examples
+        run: |
+          for ex in test_all_roms test_detailed test_instruction_coverage test_trace; do
+            echo "=== Running $ex ==="
+            cargo run --example "$ex" || exit 1
+            echo ""
+          done
+        shell: bash
+        timeout-minutes: 10
 
       - name: Upload results
         if: always()

@@ -39,14 +39,14 @@ fn main() {
     println!("Setting up tile data...");
 
     let tile_0_data: [u8; 32] = [
-        0x11, 0x11, 0x22, 0x22,  // Row 0: 1,1,2,2,1,1,2,2
-        0x11, 0x11, 0x22, 0x22,  // Row 1
-        0x33, 0x33, 0x44, 0x44,  // Row 2: 3,3,4,4,3,3,4,4
-        0x33, 0x33, 0x44, 0x44,  // Row 3
-        0x55, 0x55, 0x66, 0x66,  // Row 4: 5,5,6,6,5,5,6,6
-        0x55, 0x55, 0x66, 0x66,  // Row 5
-        0x77, 0x77, 0x00, 0x00,  // Row 6: 7,7,0,0,7,7,0,0
-        0x77, 0x77, 0x00, 0x00,  // Row 7
+        0x11, 0x11, 0x22, 0x22, // Row 0: 1,1,2,2,1,1,2,2
+        0x11, 0x11, 0x22, 0x22, // Row 1
+        0x33, 0x33, 0x44, 0x44, // Row 2: 3,3,4,4,3,3,4,4
+        0x33, 0x33, 0x44, 0x44, // Row 3
+        0x55, 0x55, 0x66, 0x66, // Row 4: 5,5,6,6,5,5,6,6
+        0x55, 0x55, 0x66, 0x66, // Row 5
+        0x77, 0x77, 0x00, 0x00, // Row 6: 7,7,0,0,7,7,0,0
+        0x77, 0x77, 0x00, 0x00, // Row 7
     ];
 
     // Write tile 0 to VRAM at 0x0600_0000
@@ -87,7 +87,7 @@ fn main() {
     // DISPCNT (0x0400_0000): Enable display, mode 0, BG0 enable
     let dispcnt: u16 = 0x0080 |  // Display enable (bit 7)
                         0x0100 |  // BG0 enable (bit 8)
-                        0x0000;   // Mode 0 (bits 0-2)
+                        0x0000; // Mode 0 (bits 0-2)
     gba.write_half(0x0400_0000, dispcnt);
 
     // BG0CNT (0x0400_0008): Configure BG0
@@ -97,7 +97,7 @@ fn main() {
                       (0 << 6) |   // No mosaic
                       (0 << 7) |   // 4bpp (16 colors)
                       (24 << 8) |  // Screen base = block 24 (0x0600_8000)
-                      (0 << 14);   // Size 256x256
+                      (0 << 14); // Size 256x256
     gba.write_half(0x0400_0008, bg0cnt);
 
     // BG offsets (set to 0)
@@ -129,8 +129,10 @@ fn main() {
                 let r = (color & 0x1F);
                 let g = ((color >> 5) & 0x1F);
                 let b = ((color >> 10) & 0x1F);
-                println!("  ({:3}, {:3}) = 0x{:04X} (R={:2}, G={:2}, B={:2})",
-                         x, y, color, r, g, b);
+                println!(
+                    "  ({:3}, {:3}) = 0x{:04X} (R={:2}, G={:2}, B={:2})",
+                    x, y, color, r, g, b
+                );
             }
         }
     }
@@ -160,7 +162,7 @@ fn main() {
         println!("\nTile map check (first 16 entries):");
         for i in 0..16 {
             let addr = 0x0600_8000 + (i * 2);
-            let entry = gba.mem().read_half(addr);
+            let entry = gba.mem_mut().read_half(addr);
             println!("  [{}] @ 0x{:08X} = 0x{:04X}", i, addr, entry);
         }
     } else {

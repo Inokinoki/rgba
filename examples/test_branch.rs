@@ -15,7 +15,7 @@ fn main() {
     }
 
     println!("\nFirst word at 0x08000000:");
-    let word = gba.mem().read_word(0x08000000);
+    let word = gba.mem_mut().read_word(0x08000000);
     println!("  0x{:08X}", word);
 
     println!("\nExpected: 0xEA00002E (branch to 0x080000C0)");
@@ -35,7 +35,11 @@ fn main() {
         println!("\nOffset calculation:");
         println!("  offset_imm = {}", offset_imm);
         println!("  offset = {}", offset);
-        println!("  target = 0x08000000 + 8 + {} = 0x{:08X}", offset, 0x08000000 + 8 + offset as u32);
+        println!(
+            "  target = 0x08000000 + 8 + {} = 0x{:08X}",
+            offset,
+            0x08000000 + 8 + offset as u32
+        );
 
         // Now execute one step
         println!("\nExecuting one step...");
@@ -54,8 +58,11 @@ fn main() {
             println!("  Got:      0x{:08X}", pc_after);
 
             // Check what's at 0x080000C0
-            let target_insn = gba.mem().read_word(0x080000C0);
-            println!("\nInstruction at target (0x080000C0): 0x{:08X}", target_insn);
+            let target_insn = gba.mem_mut().read_word(0x080000C0);
+            println!(
+                "\nInstruction at target (0x080000C0): 0x{:08X}",
+                target_insn
+            );
         }
     } else {
         println!("\n✗ Instruction mismatch!");

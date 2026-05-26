@@ -489,6 +489,20 @@ impl Gba {
         }
     }
 
+    /// Run N frames of emulation but only render the last one (frame skipping)
+    /// This gives Nx emulation speed without Nx rendering cost
+    pub fn run_frames_skip_render(&mut self, framebuffer: &mut [u32], skip_count: u32) {
+        // Run (skip_count) frames of emulation without rendering
+        for _ in 0..skip_count {
+            for _ in 0..228 {
+                self.run_scanline();
+            }
+        }
+
+        // Run one more frame with rendering
+        self.run_frame_parallel(framebuffer);
+    }
+
     /// Loads a ROM into memory
     pub fn load_rom(&mut self, data: Vec<u8>) {
         self.mem.load_rom(data);

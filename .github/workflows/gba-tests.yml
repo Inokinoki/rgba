@@ -2,7 +2,7 @@ name: GBA Tests
 
 on:
   push:
-    branches: [master, feat/*]
+    branches: [master, feat/*, chore/*]
   pull_request:
     branches: [master]
 
@@ -52,6 +52,15 @@ jobs:
 
       - name: Build all examples (compile check)
         run: cargo build --examples
+        shell: bash
+
+      - name: Build examples with gui feature (compile check)
+        run: cargo build --examples --features gui
+        shell: bash
+
+      - name: Install xvfb (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb libxkbcommon-dev
         shell: bash
 
       - name: Run GBA tests

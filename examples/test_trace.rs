@@ -1,7 +1,7 @@
 use rgba::Gba;
 
 fn main() {
-    let rom_path = "/tmp/gba-tests/arm/arm.gba";
+    let rom_path = "gba-tests/arm/arm.gba";
 
     println!("Tracing ARM test execution...");
     println!("═══════════════════════════════════════════════════════");
@@ -32,10 +32,15 @@ fn main() {
         let v = gba.cpu().get_flag_v();
 
         if step < 50 || pc != prev_pc {
-            println!("Step {:4}: PC=0x{:08X} R15=0x{:08X} R12=0x{:08X} NZCV={:04b} Mode={:?}",
-                step, pc, r15, r12,
+            println!(
+                "Step {:4}: PC=0x{:08X} R15=0x{:08X} R12=0x{:08X} NZCV={:04b} Mode={:?}",
+                step,
+                pc,
+                r15,
+                r12,
                 (n as u8) << 3 | (z as u8) << 2 | (c as u8) << 1 | v as u8,
-                mode);
+                mode
+            );
             prev_pc = pc;
             pc_changes += 1;
         }
@@ -49,5 +54,8 @@ fn main() {
     }
 
     println!("\n═══════════════════════════════════════════════════════");
-    println!("Traced {} instructions with {} PC changes", 1000, pc_changes);
+    println!(
+        "Traced {} instructions with {} PC changes",
+        1000, pc_changes
+    );
 }

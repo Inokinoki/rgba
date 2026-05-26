@@ -2,11 +2,11 @@ use rgba::Gba;
 
 fn main() {
     let test_dirs = [
-        ("arm", "/tmp/gba-tests/arm/arm.gba"),
-        ("bios", "/tmp/gba-tests/bios/bios.gba"),
-        ("thumb", "/tmp/gba-tests/thumb/thumb.gba"),
-        ("memory", "/tmp/gba-tests/memory/memory.gba"),
-        ("unsafe", "/tmp/gba-tests/unsafe/unsafe.gba"),
+        ("arm", "gba-tests/arm/arm.gba"),
+        ("bios", "gba-tests/bios/bios.gba"),
+        ("thumb", "gba-tests/thumb/thumb.gba"),
+        ("memory", "gba-tests/memory/memory.gba"),
+        ("unsafe", "gba-tests/unsafe/unsafe.gba"),
     ];
 
     for (test_name, test_path) in test_dirs.iter() {

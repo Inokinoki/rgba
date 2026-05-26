@@ -211,8 +211,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Run emulation
         if is_running {
-            // Run one frame (16.78 MHz / 60 FPS ≈ 280,000 cycles per frame)
-            for _ in 0..280_000 {
+            // Run one frame (~28k steps gives reasonable FPS while still executing ROM)
+            // Full GBA frame is ~280k cycles but we sync PPU each frame anyway
+            for _ in 0..14_000 {
                 gba.step();
             }
         }

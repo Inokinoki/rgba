@@ -211,14 +211,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Run emulation
         if is_running {
-            // Run one frame (~28k steps gives reasonable FPS while still executing ROM)
-            // Full GBA frame is ~280k cycles but we sync PPU each frame anyway
-            for _ in 0..14_000 {
+            // Run enough cycles for PPU to render a full frame
+            // GBA frame = ~280k cycles (16.78 MHz / 60 FPS)
+            for _ in 0..280_000 {
                 gba.step();
             }
         }
 
-        // Sync PPU state from Memory before rendering
+        // Sync PPU state from Memory after frame completes
         gba.sync_ppu();
 
         // Render the screen

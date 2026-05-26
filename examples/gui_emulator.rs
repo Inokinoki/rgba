@@ -211,8 +211,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Run emulation
         if is_running {
-            // Run one frame (approximately 2800 steps for 60 FPS)
-            for _ in 0..2800 {
+            // Run one frame (16.78 MHz / 60 FPS ≈ 280,000 cycles per frame)
+            for _ in 0..280_000 {
                 gba.step();
             }
         }

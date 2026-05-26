@@ -429,37 +429,55 @@ impl Gba {
     /// Sync PPU state from Memory (IO registers and VRAM)
     /// This must be called before rendering to get the latest state
     pub fn sync_ppu(&mut self) {
-        self.ppu.sync_vram(self.mem.vram());
-        self.ppu.sync_oam(self.mem.oam());
+        let has_io = self.mem.io_ppu_dirty;
+        let has_vram = self.mem.vram_dirty;
+        let has_oam = self.mem.oam_dirty;
 
-        let io = self.mem.io();
-
-        self.ppu.set_dispcnt(u16::from_le_bytes([io[0], io[1]]));
-
-        for bg in 0..4 {
-            let off = 8 + bg * 2;
-            self.ppu
-                .set_bgcnt(bg, u16::from_le_bytes([io[off], io[off + 1]]));
+        if !has_io && !has_vram && !has_oam {
+            return; // Nothing to sync
         }
 
-        for bg in 0..4 {
-            let h_off = 16 + bg * 4;
-            let v_off = h_off + 2;
-            self.ppu
-                .set_bg_hofs(bg, u16::from_le_bytes([io[h_off], io[h_off + 1]]) & 0x1FF);
-            self.ppu
-                .set_bg_vofs(bg, u16::from_le_bytes([io[v_off], io[v_off + 1]]) & 0x1FF);
+        if has_vram {
+            self.ppu.sync_vram(self.mem.vram());
+            self.mem.vram_dirty = false;
         }
 
-        self.ppu
-            .set_blend_control(u16::from_le_bytes([io[0x50], io[0x51]]));
-        self.ppu
-            .set_blend_alpha(u16::from_le_bytes([io[0x52], io[0x53]]));
-        self.ppu
-            .set_blend_brightness(u16::from_le_bytes([io[0x54], io[0x55]]));
+        if has_oam {
+            self.ppu.sync_oam(self.mem.oam());
+            self.mem.oam_dirty = false;
+        }
 
-        self.ppu.bg_mosaic = u16::from_le_bytes([io[0x4C], io[0x4D]]);
-        self.ppu.obj_mosaic = u16::from_le_bytes([io[0x4E], io[0x4F]]);
+        if has_io {
+            let io = self.mem.io();
+            self.ppu.set_dispcnt(u16::from_le_bytes([io[0], io[1]]));
+
+            for bg in 0..4 {
+                let off = 8 + bg * 2;
+                self.ppu
+                    .set_bgcnt(bg, u16::from_le_bytes([io[off], io[off + 1]]));
+            }
+
+            for bg in 0..4 {
+                let h_off = 16 + bg * 4;
+                let v_off = h_off + 2;
+                self.ppu
+                    .set_bg_hofs(bg, u16::from_le_bytes([io[h_off], io[h_off + 1]]) & 0x1FF);
+                self.ppu
+                    .set_bg_vofs(bg, u16::from_le_bytes([io[v_off], io[v_off + 1]]) & 0x1FF);
+            }
+
+            self.ppu
+                .set_blend_control(u16::from_le_bytes([io[0x50], io[0x51]]));
+            self.ppu
+                .set_blend_alpha(u16::from_le_bytes([io[0x52], io[0x53]]));
+            self.ppu
+                .set_blend_brightness(u16::from_le_bytes([io[0x54], io[0x55]]));
+
+            self.ppu.bg_mosaic = u16::from_le_bytes([io[0x4C], io[0x4D]]);
+            self.ppu.obj_mosaic = u16::from_le_bytes([io[0x4E], io[0x4F]]);
+
+            self.mem.io_ppu_dirty = false;
+        }
     }
 
     /// Sync PPU state TO Memory (DISPSTAT, VCOUNT)

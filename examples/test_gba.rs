@@ -13,31 +13,31 @@ fn main() {
         println!("Testing {}...", test_name);
 
         if let Ok(rom_data) = std::fs::read(test_path) {
-            let mut gba = rgba::Gba::new();
+            let mut gba = Gba::new();
             gba.load_rom(rom_data);
 
             println!("Running for {} steps...", test_name);
 
-            for _ in 0..500_000 {
+            let mut r12 = 0;
+            for step in 0..500_000 {
                 gba.step();
 
-                let r12 = gba.cpu().get_reg(12);
-            if r12 != 0 && _ == 500_000 - 1 {
-                    println!("Test {} FAILED at step {}!", test_name);
+                r12 = gba.cpu().get_reg(12);
+                if r12 != 0 && step == 499_999 {
+                    println!("Test {} FAILED at step {}!", test_name, step);
                     break;
                 }
             }
 
             let pc = gba.cpu().get_pc();
-            println!("Final PC: 0x{:08X}", pc);
-
             let result = if r12 == 0 { "✅ PASS" } else { "❌ FAIL" };
 
-            println!("  {} RAN {} steps - Final PC: 0x{:08X} - R12: 0x{:08X} - {}",
-                test_name, result, pc);
+            println!(
+                "  {} RAN 500000 steps - Final PC: 0x{:08X} - R12: 0x{:08X} - {}",
+                test_name, pc, r12, result
+            );
         }
     }
 
     println!();
-}
 }

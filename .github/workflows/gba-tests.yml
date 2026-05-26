@@ -50,6 +50,10 @@ jobs:
         run: cargo build --example run_all_gba_tests --release
         shell: bash
 
+      - name: Build all examples (compile check)
+        run: cargo build --examples
+        shell: bash
+
       - name: Run GBA tests
         run: cargo run --example run_all_gba_tests --release 2>&1 | tee results.txt
         shell: bash

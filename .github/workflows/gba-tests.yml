@@ -25,7 +25,7 @@ env:
 
 jobs:
   examples:
-    name: Build examples
+    name: Build & run examples
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -52,6 +52,30 @@ jobs:
 
       - name: Build examples with gui feature
         run: cargo build --examples --features gui
+        shell: bash
+
+      - name: Install xvfb (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb libxkbcommon-dev
+        shell: bash
+
+      - name: Run self-contained examples
+        run: |
+          for ex in cpu_test memory_test quick_start input_demo graphics_demo; do
+            echo "=== Running $ex ==="
+            timeout 30 cargo run --example "$ex" || exit 1
+            echo ""
+          done
+        shell: bash
+
+      - name: Run gui examples (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          for ex in gui_emulator simple_gui_demo; do
+            echo "=== Running $ex ==="
+            timeout 10 xvfb-run cargo run --example "$ex" --features gui 2>&1 || true
+            echo ""
+          done
         shell: bash
 
   test:
@@ -107,6 +131,15 @@ jobs:
             echo "ERROR: Expected 13 passed, 0 failed"
             exit 1
           fi
+        shell: bash
+
+      - name: Run ROM-dependent examples
+        run: |
+          for ex in test_all_roms test_detailed test_instruction_coverage test_trace; do
+            echo "=== Running $ex ==="
+            timeout 120 cargo run --example "$ex" || exit 1
+            echo ""
+          done
         shell: bash
 
       - name: Upload results

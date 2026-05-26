@@ -76,6 +76,11 @@ pub struct Cpu {
     pc_written: bool,
     halted: bool,
 
+    // Instruction cache (PC -> opcode) for hot loops
+    // Simple direct-mapped cache with 1024 entries
+    arm_cache: [(u32, u32); 1024],   // (PC, opcode) pairs
+    thumb_cache: [(u32, u16); 1024], // (PC, opcode) pairs
+
     // Trace buffer for debugging
     #[cfg(debug_assertions)]
     trace_buf: std::collections::VecDeque<(u32, u32, [u32; 16], u32)>,
@@ -101,6 +106,8 @@ impl Cpu {
             pipeline_loaded: false,
             pc_written: false,
             halted: false,
+            arm_cache: [(0, 0); 1024],
+            thumb_cache: [(0, 0); 1024],
 
             #[cfg(debug_assertions)]
             trace_buf: std::collections::VecDeque::with_capacity(60),
@@ -467,6 +474,7 @@ impl Cpu {
         cycles
     }
 
+    #[inline(always)]
     fn execute_arm_with_pc(
         &mut self,
         opcode: u32,
@@ -570,6 +578,7 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
     fn execute_arm_data_processing(&mut self, opcode: u32, mem: &mut super::Memory) -> u32 {
         let op = (opcode >> 21) & 0xF;
         let s = ((opcode >> 20) & 1) != 0;
@@ -1197,6 +1206,7 @@ impl Cpu {
         1
     }
 
+    #[inline(always)]
     fn execute_arm_load_store_halfword(&mut self, opcode: u32, mem: &mut super::Memory) -> u32 {
         let rn = ((opcode >> 16) & 0xF) as usize;
         let rd = ((opcode >> 12) & 0xF) as usize;
@@ -1310,6 +1320,7 @@ impl Cpu {
         2
     }
 
+    #[inline(always)]
     fn execute_arm_load_store(&mut self, _opcode: u32, mem: &mut super::Memory) -> u32 {
         let rn = ((_opcode >> 16) & 0xF) as usize;
         let rd = ((_opcode >> 12) & 0xF) as usize;
@@ -1582,6 +1593,7 @@ impl Cpu {
         3
     }
 
+    #[inline(always)]
     fn execute_arm_branch(
         &mut self,
         opcode: u32,
@@ -2509,6 +2521,7 @@ impl Cpu {
         1
     }
 
+    #[inline(always)]
     fn check_condition(&self, cond: usize) -> bool {
         match cond {
             0x0 => self.get_flag_z(),                                              // EQ

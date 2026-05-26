@@ -553,6 +553,17 @@ impl Memory {
             }
             MemoryRegion::Unknown => {}
         }
+
+        // Set dirty flags based on written address
+        match addr {
+            0x06000000..=0x06017FFF => self.vram_dirty = true,
+            0x07000000..=0x070003FF => self.oam_dirty = true,
+            0x05000000..=0x050003FF => self.palette_dirty = true,
+            0x04000000..=0x04000055 => self.io_ppu_dirty = true,
+            0x04000100..=0x0400010F => self.io_timer_dirty = true,
+            0x040000B0..=0x040000DF => self.io_dma_dirty = true,
+            _ => {}
+        }
     }
 
     /// Write a byte to memory (public, handles OAM and VRAM byte-write restrictions)

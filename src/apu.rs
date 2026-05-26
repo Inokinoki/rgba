@@ -7,26 +7,27 @@
 
 /// PSG Square Wave Channel (Channel 1-2)
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SquareChannel {
     enabled: bool,
-    duty_cycle: u8,      // 0-3 (12.5%, 25%, 50%, 75%)
+    duty_cycle: u8, // 0-3 (12.5%, 25%, 50%, 75%)
     length_enabled: bool,
-    length_load: u8,     // 0-63
+    length_load: u8, // 0-63
     length_counter: u8,
     envelope_enabled: bool,
     envelope_direction: bool, // true = increasing, false = decreasing
-    envelope_step: u8,   // 0-7
-    envelope_volume: u8, // 0-15
+    envelope_step: u8,        // 0-7
+    envelope_volume: u8,      // 0-15
     envelope_counter: u8,
-    sweep_enabled: bool, // Channel 1 only
-    sweep_shift: u8,     // 0-7
+    sweep_enabled: bool,   // Channel 1 only
+    sweep_shift: u8,       // 0-7
     sweep_direction: bool, // true = addition, false = subtraction
-    sweep_time: u8,      // 0-7
+    sweep_time: u8,        // 0-7
     sweep_counter: u8,
-    frequency: u16,      // 0-2047
+    frequency: u16, // 0-2047
     frequency_counter: u16,
     duty_position: u8,
-    output_volume: u8,   // 0-15
+    output_volume: u8, // 0-15
 }
 
 impl SquareChannel {
@@ -79,10 +80,10 @@ impl SquareChannel {
 
     fn get_duty_output(&self) -> bool {
         match self.duty_cycle {
-            0 => matches!(self.duty_position, 0..=0),   // 12.5%
-            1 => matches!(self.duty_position, 0..=1),   // 25%
-            2 => matches!(self.duty_position, 0..=3),   // 50%
-            3 => matches!(self.duty_position, 0..=5),   // 75%
+            0 => matches!(self.duty_position, 0..=0), // 12.5%
+            1 => matches!(self.duty_position, 0..=1), // 25%
+            2 => matches!(self.duty_position, 0..=3), // 50%
+            3 => matches!(self.duty_position, 0..=5), // 75%
             _ => false,
         }
     }
@@ -117,16 +118,17 @@ impl SquareChannel {
 
 /// PSG Wave Channel (Channel 3)
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct WaveChannel {
     enabled: bool,
     length_enabled: bool,
-    length_load: u8,     // 0-255
+    length_load: u8, // 0-255
     length_counter: u8,
-    volume_code: u8,     // 0-3
-    frequency: u16,      // 0-2047
+    volume_code: u8, // 0-3
+    frequency: u16,  // 0-2047
     frequency_counter: u16,
     wave_position: u8,
-    wave_ram: [u8; 32],  // 32 4-bit samples
+    wave_ram: [u8; 32], // 32 4-bit samples
     output_volume: u8,
 }
 
@@ -204,6 +206,7 @@ impl WaveChannel {
 
 /// PSG Noise Channel (Channel 4)
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct NoiseChannel {
     enabled: bool,
     length_enabled: bool,
@@ -214,8 +217,8 @@ pub struct NoiseChannel {
     envelope_step: u8,
     envelope_volume: u8,
     envelope_counter: u8,
-    clock_shift: u8,     // 0-14
-    width_mode: bool,     // false = 7-bit, true = 15-bit
+    clock_shift: u8,  // 0-14
+    width_mode: bool, // false = 7-bit, true = 15-bit
     lfsr: u16,
     output_volume: u8,
 }
@@ -283,14 +286,15 @@ impl NoiseChannel {
 
 /// Direct Sound Channel (FIFO DMA)
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct DirectSoundChannel {
     enabled: bool,
-    fifo: [u8; 32],     // 8 words * 4 bytes
+    fifo: [u8; 32], // 8 words * 4 bytes
     fifo_read: u8,
     fifo_write: u8,
     fifo_count: u8,
-    volume: u8,         // 0-3 (50%, 100%, 25%, 50% with right shift)
-    timer: u8,          // Timer 0 or 1
+    volume: u8, // 0-3 (50%, 100%, 25%, 50% with right shift)
+    timer: u8,  // Timer 0 or 1
     output_right: bool,
     output_left: bool,
     current_sample: i16,
@@ -347,10 +351,10 @@ impl DirectSoundChannel {
 
     pub fn get_output(&self) -> i16 {
         let volume_shift = match self.volume {
-            0 => 1,  // 50%
-            1 => 0,  // 100%
-            2 => 2,  // 25%
-            3 => 1,  // 50% with right shift
+            0 => 1, // 50%
+            1 => 0, // 100%
+            2 => 2, // 25%
+            3 => 1, // 50% with right shift
             _ => 1,
         };
         self.current_sample >> volume_shift
@@ -379,8 +383,8 @@ pub struct Apu {
 
     // Master control
     master_enabled: bool,
-    volume_left: u8,    // 0-7
-    volume_right: u8,   // 0-7
+    volume_left: u8,  // 0-7
+    volume_right: u8, // 0-7
 
     // Mixing
     left_enabled: [bool; 8],  // Enable each channel on left
@@ -443,20 +447,44 @@ impl Apu {
         let mut right_mixed = 0i32;
 
         // PSG channels
-        if self.left_enabled[0] { left_mixed += self.square1.get_output() as i32; }
-        if self.right_enabled[0] { right_mixed += self.square1.get_output() as i32; }
-        if self.left_enabled[1] { left_mixed += self.square2.get_output() as i32; }
-        if self.right_enabled[1] { right_mixed += self.square2.get_output() as i32; }
-        if self.left_enabled[2] { left_mixed += self.wave.get_output() as i32; }
-        if self.right_enabled[2] { right_mixed += self.wave.get_output() as i32; }
-        if self.left_enabled[3] { left_mixed += self.noise.get_output() as i32; }
-        if self.right_enabled[3] { right_mixed += self.noise.get_output() as i32; }
+        if self.left_enabled[0] {
+            left_mixed += self.square1.get_output() as i32;
+        }
+        if self.right_enabled[0] {
+            right_mixed += self.square1.get_output() as i32;
+        }
+        if self.left_enabled[1] {
+            left_mixed += self.square2.get_output() as i32;
+        }
+        if self.right_enabled[1] {
+            right_mixed += self.square2.get_output() as i32;
+        }
+        if self.left_enabled[2] {
+            left_mixed += self.wave.get_output() as i32;
+        }
+        if self.right_enabled[2] {
+            right_mixed += self.wave.get_output() as i32;
+        }
+        if self.left_enabled[3] {
+            left_mixed += self.noise.get_output() as i32;
+        }
+        if self.right_enabled[3] {
+            right_mixed += self.noise.get_output() as i32;
+        }
 
         // Direct Sound channels
-        if self.left_enabled[4] { left_mixed += self.ds_a.get_output() as i32; }
-        if self.right_enabled[4] { right_mixed += self.ds_a.get_output() as i32; }
-        if self.left_enabled[5] { left_mixed += self.ds_b.get_output() as i32; }
-        if self.right_enabled[5] { right_mixed += self.ds_b.get_output() as i32; }
+        if self.left_enabled[4] {
+            left_mixed += self.ds_a.get_output() as i32;
+        }
+        if self.right_enabled[4] {
+            right_mixed += self.ds_a.get_output() as i32;
+        }
+        if self.left_enabled[5] {
+            left_mixed += self.ds_b.get_output() as i32;
+        }
+        if self.right_enabled[5] {
+            right_mixed += self.ds_b.get_output() as i32;
+        }
 
         // Apply master volume
         self.output_left = ((left_mixed * self.volume_left as i32) / 7) as i16;

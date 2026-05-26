@@ -15,6 +15,19 @@
 
 use bitflags::bitflags;
 
+use crate::{Eeprom, Flash};
+
+/// Cartridge save type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveType {
+    None,
+    Sram,
+    Flash64K,
+    Flash128K,
+    Eeprom512B,
+    Eeprom8K,
+}
+
 bitflags! {
     /// Interrupt flags
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,7 +147,7 @@ impl InterruptController {
         match offset {
             0x000 => self.ie.bits(),
             0x002 => self.if_raw.bits(),
-            0x200 => self.ie_fp.bits(),
+            0x200 => self.ie.bits(),
             0x208 => self.ime as u16,
             _ => 0,
         }
@@ -149,7 +162,7 @@ impl InterruptController {
                 self.if_raw &= !(Interrupt::from_bits_truncate(val));
                 self.if_processed &= !(Interrupt::from_bits_truncate(val));
             }
-            0x200 => self.ie_fp = Interrupt::from_bits_truncate(val),
+            0x200 => self.ie = Interrupt::from_bits_truncate(val),
             0x208 => self.ime = val != 0,
             _ => {}
         }
@@ -189,6 +202,9 @@ pub struct Memory {
     // Object Attribute Memory (1KB)
     oam: Box<[u8; 0x400]>,
 
+    // SRAM (32KB) - cartridge battery-backed RAM
+    sram: Box<[u8; 0x8000]>,
+
     // ROM (max 32MB) - mirrored across different waitstate regions
     rom: Vec<u8>,
 
@@ -197,6 +213,14 @@ pub struct Memory {
 
     // Interrupt controller
     pub interrupt: InterruptController,
+
+    // HALT state - set when writing to HALTCNT (0x0400_0301)
+    pub halt_pending: bool,
+
+    // Save type configuration and backends
+    save_type: SaveType,
+    flash: Option<Flash>,
+    eeprom: Option<Eeprom>,
 }
 
 impl Memory {
@@ -249,9 +273,14 @@ impl Memory {
             palette: Box::new([0u8; 0x400]),
             vram: Box::new([0u8; 0x18000]),
             oam: Box::new([0u8; 0x400]),
+            sram: Box::new([0xFFu8; 0x8000]),
             rom: Vec::new(),
             waitcnt: 0x0000,
             interrupt: InterruptController::new(),
+            halt_pending: false,
+            save_type: SaveType::None,
+            flash: None,
+            eeprom: None,
         }
     }
 
@@ -262,12 +291,49 @@ impl Memory {
         self.palette.fill(0);
         self.vram.fill(0);
         self.oam.fill(0);
+        self.sram.fill(0);
         self.waitcnt = 0x0000;
         self.interrupt.reset();
+        if let Some(ref mut flash) = self.flash {
+            flash.reset();
+        }
+        if let Some(ref mut eeprom) = self.eeprom {
+            eeprom.reset();
+        }
     }
 
     pub fn load_rom(&mut self, data: Vec<u8>) {
         self.rom = data;
+    }
+
+    /// Set the cartridge save type
+    pub fn set_save_type(&mut self, save_type: SaveType) {
+        self.save_type = save_type;
+        self.flash = None;
+        self.eeprom = None;
+        match save_type {
+            SaveType::Flash64K => self.flash = Some(Flash::new_64k()),
+            SaveType::Flash128K => self.flash = Some(Flash::new_128k()),
+            SaveType::Eeprom512B => self.eeprom = Some(Eeprom::new_512b()),
+            SaveType::Eeprom8K => self.eeprom = Some(Eeprom::new_8k()),
+            _ => {}
+        }
+    }
+
+    /// Get the current save type
+    pub fn save_type(&self) -> SaveType {
+        self.save_type
+    }
+
+    /// Load SRAM data from a save file
+    pub fn load_sram(&mut self, data: &[u8]) {
+        let len = data.len().min(self.sram.len());
+        self.sram[..len].copy_from_slice(&data[..len]);
+    }
+
+    /// Check if address is in EEPROM access range
+    fn is_eeprom_access(&self, addr: u32) -> bool {
+        matches!(self.save_type, SaveType::Eeprom512B | SaveType::Eeprom8K) && addr >= 0x0DFFFF00
     }
 
     /// Load BIOS from a file
@@ -282,6 +348,10 @@ impl Memory {
     /// Check if BIOS is loaded (not all zeros)
     pub fn has_bios(&self) -> bool {
         self.bios.iter().any(|&b| b != 0)
+    }
+
+    pub fn set_bios_read_return(&mut self, val: u32) {
+        self.bios_read_return = val;
     }
 
     /// Get access cycles for a memory region
@@ -334,12 +404,12 @@ impl Memory {
         match addr {
             0x0000_0000..=0x0000_3FFF => (MemoryRegion::Bios, (addr - 0x0000_0000) as usize),
             // EWRAM (256KB) and its mirrors
-            0x0200_0000..=0x020F_FFFF => {
+            0x0200_0000..=0x02FF_FFFF => {
                 let offset = ((addr - 0x0200_0000) & 0x3_FFFF) as usize; // Mask to 256KB
                 (MemoryRegion::Wram, offset)
             }
             // IWRAM (32KB) and its mirrors
-            0x0300_0000..=0x030F_FFFF => {
+            0x0300_0000..=0x03FF_FFFF => {
                 let offset = ((addr - 0x0300_0000) & 0x7FFF) as usize; // Mask to 32KB
                 (MemoryRegion::Iwram, offset)
             }
@@ -361,20 +431,25 @@ impl Memory {
                 let offset = ((addr - 0x0700_0000) & 0x3FF) as usize; // Mask to 1KB
                 (MemoryRegion::Oam, offset)
             }
-            // ROM (with mirrors)
+            // SRAM (32KB) and its mirrors
+            0x0E00_0000..=0x0FFF_FFFF => {
+                let offset = ((addr - 0x0E00_0000) & 0x7FFF) as usize;
+                (MemoryRegion::Sram, offset)
+            }
+            // ROM WS0 (0x08000000-0x09FFFFFF)
             0x0800_0000..=0x09FF_FFFF => {
                 let offset = (addr - 0x0800_0000) as usize;
-                (MemoryRegion::Rom, offset % self.rom.len().max(1))
+                (MemoryRegion::Rom, offset)
             }
-            // ROM mirror at 0x0A000000-0x0BFFFFFF (GamePak mirror 1)
+            // ROM WS1 (0x0A000000-0x0BFFFFFF)
             0x0A00_0000..=0x0BFF_FFFF => {
                 let offset = (addr - 0x0A00_0000) as usize;
-                (MemoryRegion::Rom, offset % self.rom.len().max(1))
+                (MemoryRegion::Rom, offset)
             }
-            // ROM mirror at 0x0C000000-0x0DFFFFFF (GamePak mirror 2)
+            // ROM WS2 (0x0C000000-0x0DFFFFFF)
             0x0C00_0000..=0x0DFF_FFFF => {
                 let offset = (addr - 0x0C00_0000) as usize;
-                (MemoryRegion::Rom, offset % self.rom.len().max(1))
+                (MemoryRegion::Rom, offset)
             }
             _ => (MemoryRegion::Unknown, 0),
         }
@@ -401,11 +476,31 @@ impl Memory {
             MemoryRegion::Palette => self.palette[offset],
             MemoryRegion::Vram => self.vram[offset],
             MemoryRegion::Oam => self.oam[offset],
+            MemoryRegion::Sram => match self.save_type {
+                SaveType::Sram | SaveType::None => self.sram[offset],
+                SaveType::Flash64K | SaveType::Flash128K => {
+                    self.flash.as_ref().map_or(0xFF, |f| f.read(offset as u32))
+                }
+                _ => 0xFF,
+            },
             MemoryRegion::Rom => {
+                // EEPROM read interception
+                if self.is_eeprom_access(addr) {
+                    return self.eeprom.as_mut().map_or(0xFF, |e| e.serial_read());
+                }
                 if self.rom.is_empty() {
                     0
                 } else {
-                    self.rom[offset % self.rom.len()]
+                    let mirrored = offset % self.rom.len();
+                    if offset < self.rom.len() {
+                        self.rom[mirrored]
+                    } else {
+                        if addr & 1 != 0 {
+                            ((addr >> 9) & 0xFF) as u8
+                        } else {
+                            ((addr >> 1) & 0xFF) as u8
+                        }
+                    }
                 }
             }
             MemoryRegion::Unknown => 0,
@@ -428,8 +523,19 @@ impl Memory {
             MemoryRegion::Palette => self.palette[offset] = val,
             MemoryRegion::Vram => self.vram[offset] = val,
             MemoryRegion::Oam => self.oam[offset] = val,
+            MemoryRegion::Sram => match self.save_type {
+                SaveType::Sram | SaveType::None => self.sram[offset] = val,
+                SaveType::Flash64K | SaveType::Flash128K => {
+                    self.flash.as_mut().map(|f| f.write(offset as u32, val));
+                }
+                _ => {}
+            },
             MemoryRegion::Rom => {
-                // ROM is read-only
+                // EEPROM write interception
+                if self.is_eeprom_access(addr) {
+                    self.eeprom.as_mut().map(|e| e.serial_write(val));
+                }
+                // ROM is otherwise read-only
             }
             MemoryRegion::Unknown => {}
         }
@@ -468,29 +574,38 @@ impl Memory {
 
     /// Read a halfword (16-bit) from memory
     pub fn read_half(&mut self, addr: u32) -> u16 {
-        if addr & 1 != 0 {
-            // Unaligned read - rotate
-            let (region, offset) = self.map_address(addr & !1);
-            let val = match region {
-                MemoryRegion::Palette => u16::from_le_bytes([self.palette[offset], self.palette[offset + 1]]),
-                MemoryRegion::Vram => u16::from_le_bytes([self.vram[offset], self.vram[offset + 1]]),
-                MemoryRegion::Oam => u16::from_le_bytes([self.oam[offset], self.oam[offset + 1]]),
-                _ => {
-                    let low = self.read_byte(addr);
-                    let high = self.read_byte(addr + 1);
-                    u16::from_le_bytes([low, high])
-                }
-            };
-            val.rotate_right(8 * (addr & 1) as u32)
-        } else {
-            let low = self.read_byte(addr);
-            let high = self.read_byte(addr + 1);
-            u16::from_le_bytes([low, high])
+        if addr >= 0x0E00_0000 && addr < 0x1000_0000 {
+            let b = self.read_byte(addr);
+            return u16::from_le_bytes([b, b]);
         }
+        let aligned = addr & !1;
+        let low = self.read_byte(aligned);
+        let high = self.read_byte(aligned.wrapping_add(1));
+        u16::from_le_bytes([low, high])
+    }
+
+    pub fn read_half_rotated(&mut self, addr: u32) -> u32 {
+        if addr >= 0x0E00_0000 && addr < 0x1000_0000 {
+            let b = self.read_byte(addr) as u32;
+            return b | (b << 8);
+        }
+        let aligned = addr & !1;
+        let low = self.read_byte(aligned) as u32;
+        let high = self.read_byte(aligned.wrapping_add(1)) as u32;
+        let val = low | (high << 8);
+        let rotate = ((addr & 1) * 8) as u32;
+        val.rotate_right(rotate)
     }
 
     /// Write a halfword (16-bit) to memory
     pub fn write_half(&mut self, addr: u32, val: u16) {
+        if addr >= 0x0E00_0000 && addr < 0x1000_0000 {
+            let byte_index = (addr & 1) as usize;
+            let byte_val = val.to_le_bytes()[byte_index];
+            self.write_byte_internal(addr, byte_val);
+            return;
+        }
+        let addr = addr & !1;
         let bytes = val.to_le_bytes();
         self.write_byte_internal(addr, bytes[0]);
         self.write_byte_internal(addr + 1, bytes[1]);
@@ -498,6 +613,10 @@ impl Memory {
 
     /// Read a word (32-bit) from memory
     pub fn read_word(&mut self, addr: u32) -> u32 {
+        if addr >= 0x0E00_0000 && addr < 0x1000_0000 {
+            let b = self.read_byte(addr) as u32;
+            return b | (b << 8) | (b << 16) | (b << 24);
+        }
         if addr & 3 != 0 {
             // Unaligned read - rotate
             let aligned = addr & !3;
@@ -516,6 +635,13 @@ impl Memory {
 
     /// Write a word (32-bit) to memory
     pub fn write_word(&mut self, addr: u32, val: u32) {
+        if addr >= 0x0E00_0000 && addr < 0x1000_0000 {
+            let byte_index = (addr & 3) as usize;
+            let byte_val = val.to_le_bytes()[byte_index];
+            self.write_byte_internal(addr, byte_val);
+            return;
+        }
+        let addr = addr & !3;
         let bytes = val.to_le_bytes();
         for i in 0..4usize {
             self.write_byte_internal(addr.wrapping_add(i as u32), bytes[i]);
@@ -530,7 +656,7 @@ impl Memory {
         let (int_offset, byte_index) = match addr {
             0x0400_0200 | 0x0400_0201 => (Some(0x200), (addr & 1) as usize), // IE
             0x0400_0202 | 0x0400_0203 => (Some(0x202), (addr & 1) as usize), // IF
-            0x0400_0208 => (Some(0x208), 0), // IME
+            0x0400_0208 => (Some(0x208), 0),                                 // IME
             _ => (None, 0),
         };
 
@@ -544,11 +670,10 @@ impl Memory {
         }
 
         match offset {
-            0x000 => self.io[offset] | 0x80, // DISPCNT - bit 7 is always set
-            0x004 => self.io[offset], // DISPSTAT
-            0x006 => self.io[offset], // VCOUNT (would be updated by PPU)
-            0x130 => 0xFF, // Key input low byte - all keys released (active low, all 1s)
-            0x131 => 0xFF, // Key input high byte - always 1
+            0x000 => self.io[offset] | 0x80,  // DISPCNT - bit 7 is always set
+            0x004 => self.io[offset],         // DISPSTAT
+            0x006 => self.io[offset],         // VCOUNT (would be updated by PPU)
+            0x130 | 0x131 => self.io[offset], // KEYINPUT (synced from Input)
             _ => self.io[offset],
         }
     }
@@ -561,7 +686,7 @@ impl Memory {
         let (int_offset, byte_index) = match addr {
             0x0400_0200 | 0x0400_0201 => (Some(0x200), (addr & 1) as usize), // IE
             0x0400_0202 | 0x0400_0203 => (Some(0x202), (addr & 1) as usize), // IF
-            0x0400_0208 => (Some(0x208), 0), // IME
+            0x0400_0208 => (Some(0x208), 0),                                 // IME
             _ => (None, 0),
         };
 
@@ -584,6 +709,12 @@ impl Memory {
             0x204 => {
                 // WAITCNT - only some bits are writable
                 self.waitcnt = u16::from_le_bytes([val, self.io[offset + 1]]);
+            }
+            0x301 => {
+                // HALTCNT - halt the CPU
+                // Writing 0 to bit 0 enters HALT mode
+                self.halt_pending = true;
+                self.io[offset] = val;
             }
             0x000..=0x003 => {
                 // DISPCNT - display control
@@ -617,9 +748,19 @@ impl Memory {
         }
     }
 
+    /// Get a mutable reference to BIOS data (for font embedding)
+    pub fn bios_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.bios
+    }
+
     /// Get a reference to VRAM data
     pub fn vram(&self) -> &[u8] {
         &self.vram[..]
+    }
+
+    /// Get a reference to OAM data
+    pub fn oam(&self) -> &[u8] {
+        &self.oam[..]
     }
 
     /// Get a reference to IO register data
@@ -642,7 +783,7 @@ impl Memory {
         match addr {
             0x0400_0000 | 0x0400_0001 => Some(0x000), // IE
             0x0400_0002 | 0x0400_0003 => Some(0x002), // IF
-            0x0400_0208 => Some(0x208), // IME
+            0x0400_0208 => Some(0x208),               // IME
             _ => None,
         }
     }
@@ -663,6 +804,7 @@ enum MemoryRegion {
     Palette,
     Vram,
     Oam,
+    Sram,
     Rom,
     Unknown,
 }

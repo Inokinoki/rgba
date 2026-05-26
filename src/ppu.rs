@@ -58,8 +58,8 @@ pub struct Ppu {
     bg_affine: [[u32; 4]; 2], // For BG2 and BG3
 
     // Mosaic settings
-    bg_mosaic: u16,
-    obj_mosaic: u16,
+    pub bg_mosaic: u16,
+    pub obj_mosaic: u16,
 
     // Window settings
     win0_h: u16,
@@ -79,7 +79,7 @@ pub struct Ppu {
     vram: Box<[u8; 0x18000]>, // 96KB VRAM
 
     // Sprite data (simplified OAM storage)
-    sprites: [(u16, u16, u16, u16, bool); 128], // (x, y, tile, priority, enabled)
+    oam: Box<[u8; 0x400]>, // 1KB OAM
 }
 
 impl Ppu {
@@ -106,7 +106,7 @@ impl Ppu {
             bldalpha: 0,
             bldy: 0,
             vram: Box::new([0; 0x18000]),
-            sprites: [(0, 0, 0, 0, false); 128],
+            oam: Box::new([0; 0x400]),
         }
     }
 
@@ -132,7 +132,7 @@ impl Ppu {
         self.bldalpha = 0;
         self.bldy = 0;
         self.vram.fill(0);
-        self.sprites = [(0, 0, 0, 0, false); 128];
+        self.oam.fill(0);
     }
 
     /// Sync VRAM data from Memory system
@@ -199,6 +199,10 @@ impl Ppu {
         self.vcount = count;
     }
 
+    pub fn get_hcounter(&self) -> u32 {
+        self.hcounter
+    }
+
     pub fn set_hcounter(&mut self, count: u32) {
         self.hcounter = count;
     }
@@ -242,7 +246,8 @@ impl Ppu {
         if bg > 3 {
             return false;
         }
-        self.dispcnt.contains(DisplayControl::from_bits_truncate(1 << (8 + bg)))
+        self.dispcnt
+            .contains(DisplayControl::from_bits_truncate(1 << (8 + bg)))
     }
 
     pub fn set_bg_enabled(&mut self, bg: usize, enabled: bool) {
@@ -372,9 +377,25 @@ impl Ppu {
         }
     }
 
+    pub fn get_bg_affine_b(&self, bg: usize) -> u32 {
+        if bg == 2 || bg == 3 {
+            self.bg_affine[bg - 2][1]
+        } else {
+            0
+        }
+    }
+
     pub fn set_bg_affine_c(&mut self, bg: usize, val: u32) {
         if bg == 2 || bg == 3 {
             self.bg_affine[bg - 2][2] = val;
+        }
+    }
+
+    pub fn get_bg_affine_c(&self, bg: usize) -> u32 {
+        if bg == 2 || bg == 3 {
+            self.bg_affine[bg - 2][2]
+        } else {
+            0
         }
     }
 
@@ -384,9 +405,27 @@ impl Ppu {
         }
     }
 
+    pub fn get_bg_affine_d(&self, bg: usize) -> u32 {
+        if bg == 2 || bg == 3 {
+            self.bg_affine[bg - 2][3]
+        } else {
+            0
+        }
+    }
+
     // Mosaic
     pub fn get_bg_mosaic_h(&self) -> u16 {
         (self.bg_mosaic & 0xF) + 1
+    }
+
+    /// Get BG mosaic horizontal block size (raw, 0-15)
+    pub fn get_bg_mosaic_h_raw(&self) -> u16 {
+        self.bg_mosaic & 0xF
+    }
+
+    /// Get BG mosaic vertical block size (raw, 0-15)
+    pub fn get_bg_mosaic_v_raw(&self) -> u16 {
+        (self.bg_mosaic >> 4) & 0xF
     }
 
     pub fn set_bg_mosaic_h(&mut self, val: u16) {
@@ -395,6 +434,18 @@ impl Ppu {
 
     pub fn get_bg_mosaic_v(&self) -> u16 {
         ((self.bg_mosaic >> 4) & 0xF) + 1
+    }
+
+    /// Apply BG mosaic to pixel coordinates
+    pub fn apply_bg_mosaic(&self, x: u16, y: u16) -> (u16, u16) {
+        let mh = (self.bg_mosaic & 0xF) as u16;
+        let mv = ((self.bg_mosaic >> 4) & 0xF) as u16;
+        if mh == 0 && mv == 0 {
+            return (x, y);
+        }
+        let bx = if mh > 0 { (x / (mh + 1)) * (mh + 1) } else { x };
+        let by = if mv > 0 { (y / (mv + 1)) * (mv + 1) } else { y };
+        (bx, by)
     }
 
     pub fn set_bg_mosaic_v(&mut self, val: u16) {
@@ -418,8 +469,58 @@ impl Ppu {
     }
 
     // Window
+    pub fn is_window0_enabled(&self) -> bool {
+        (self.dispcnt.bits() & (1 << 13)) != 0
+    }
+
     pub fn is_window1_enabled(&self) -> bool {
-        self.dispcnt.contains(DisplayControl::WIN1)
+        (self.dispcnt.bits() & (1 << 14)) != 0
+    }
+
+    pub fn is_obj_window_enabled(&self) -> bool {
+        (self.dispcnt.bits() & (1 << 15)) != 0
+    }
+
+    /// Check if a pixel is inside any window and return the visibility mask
+    /// Returns: bitfield of which BGs are visible (bits 0-3) and OBJ (bit 4)
+    pub fn get_window_visibility(&self, x: u16, y: u16) -> u16 {
+        // If no windows enabled, everything is visible
+        let win0_en = (self.dispcnt.bits() & (1 << 13)) != 0;
+        let win1_en = (self.dispcnt.bits() & (1 << 14)) != 0;
+        let obj_win_en = (self.dispcnt.bits() & (1 << 15)) != 0;
+
+        if !win0_en && !win1_en && !obj_win_en {
+            return 0x1F; // All BGs + OBJ visible
+        }
+
+        // Check WIN0
+        if win0_en {
+            let left = (self.win0_h & 0xFF) as u16;
+            let right = ((self.win0_h >> 8) & 0xFF) as u16;
+            let top = (self.win0_v & 0xFF) as u16;
+            let bottom = ((self.win0_v >> 8) & 0xFF) as u16;
+
+            if x >= left && x < right && y >= top && y < bottom {
+                // Inside WIN0: use WININ low byte
+                return self.winin & 0x1F;
+            }
+        }
+
+        // Check WIN1
+        if win1_en {
+            let left = (self.win1_h & 0xFF) as u16;
+            let right = ((self.win1_h >> 8) & 0xFF) as u16;
+            let top = (self.win1_v & 0xFF) as u16;
+            let bottom = ((self.win1_v >> 8) & 0xFF) as u16;
+
+            if x >= left && x < right && y >= top && y < bottom {
+                // Inside WIN1: use WININ high byte
+                return (self.winin >> 8) & 0x1F;
+            }
+        }
+
+        // Outside all windows: use WINOUT
+        self.winout & 0x1F
     }
 
     pub fn set_window1_enabled(&mut self, enabled: bool) {
@@ -562,9 +663,31 @@ impl Ppu {
         self.bldcnt = val;
     }
 
-    /// Set the blend alpha register (BLDALPHA)
     pub fn set_blend_alpha(&mut self, val: u16) {
         self.bldalpha = val;
+    }
+
+    pub fn get_blend_control(&self) -> u16 {
+        self.bldcnt
+    }
+
+    pub fn get_blend_alpha(&self) -> u16 {
+        self.bldalpha
+    }
+
+    /// Get blend mode (bits 6-7 of BLDCNT):
+    /// 0 = none, 1 = alpha, 2 = brightness increase, 3 = brightness decrease
+    pub fn get_blend_mode(&self) -> u8 {
+        ((self.bldcnt >> 6) & 0x3) as u8
+    }
+
+    /// Set the blend brightness register (BLDY)
+    pub fn set_blend_brightness(&mut self, val: u16) {
+        self.bldy = val;
+    }
+
+    pub fn get_blend_brightness(&self) -> u16 {
+        self.bldy
     }
 
     // Mode 3: 16-bit bitmap (240x160)
@@ -612,62 +735,242 @@ impl Ppu {
         }
     }
 
-    // Sprite handling
-    pub fn set_sprite_x(&mut self, num: usize, x: u16) {
-        if num < 128 {
-            self.sprites[num].0 = x;
-        }
+    // Sprite/OAM handling
+    pub fn sync_oam(&mut self, oam_data: &[u8]) {
+        let len = self.oam.len().min(oam_data.len());
+        self.oam[..len].copy_from_slice(&oam_data[..len]);
     }
 
-    pub fn get_sprite_x(&self, num: usize) -> u16 {
-        if num < 128 {
-            self.sprites[num].0
+    pub fn oam(&self) -> &[u8] {
+        &*self.oam
+    }
+
+    /// Get OAM attribute word for sprite (3 words = 6 bytes each)
+    fn oam_attr(&self, sprite: usize, attr: usize) -> u16 {
+        let offset = sprite * 8 + attr * 2;
+        if offset + 1 < self.oam.len() {
+            u16::from_le_bytes([self.oam[offset], self.oam[offset + 1]])
         } else {
             0
         }
     }
 
-    pub fn set_sprite_y(&mut self, num: usize, y: u16) {
-        if num < 128 {
-            self.sprites[num].1 = y;
+    /// Get sprite shape (0=square, 1=horizontal, 2=vertical) from attr0 bits 14-15
+    pub fn sprite_shape(&self, sprite: usize) -> u16 {
+        (self.oam_attr(sprite, 0) >> 14) & 0x3
+    }
+
+    /// Get sprite size from attr1 bits 14-15
+    pub fn sprite_size(&self, sprite: usize) -> u16 {
+        (self.oam_attr(sprite, 1) >> 14) & 0x3
+    }
+
+    /// Get sprite dimensions (width, height) based on shape and size
+    pub fn sprite_dimensions(&self, sprite: usize) -> (u16, u16) {
+        let shape = self.sprite_shape(sprite) as usize;
+        let size = self.sprite_size(sprite) as usize;
+        // 4x4 table of sprite dimensions (width, height)
+        const DIMENSIONS: [[[u16; 2]; 4]; 4] = [
+            // size 0              size 1                size 2                size 3
+            [[8, 8], [16, 16], [32, 32], [64, 64]], // shape 0 (square)
+            [[16, 8], [32, 8], [32, 16], [64, 32]], // shape 1 (horizontal)
+            [[8, 16], [8, 32], [16, 32], [32, 64]], // shape 2 (vertical)
+            [[8, 8], [16, 16], [32, 32], [64, 64]], // shape 3 (prohibited)
+        ];
+        let w = DIMENSIONS[shape][size][0];
+        let h = DIMENSIONS[shape][size][1];
+        (w, h)
+    }
+
+    /// Check if sprite is double-sized (attr0 bit 9)
+    pub fn sprite_double_size(&self, sprite: usize) -> bool {
+        (self.oam_attr(sprite, 0) & 0x0200) != 0
+    }
+
+    /// Check if sprite is enabled (attr0 bits 14-15 != 10)
+    pub fn sprite_is_enabled(&self, sprite: usize) -> bool {
+        let mode = (self.oam_attr(sprite, 0) >> 14) & 0x3;
+        mode != 0b10 // Mode 10 = disabled/forbidden
+    }
+
+    /// Get sprite Y position (9-bit from attr0 bits 0-7 + attr0 bit 8 for MSB)
+    pub fn sprite_y(&self, sprite: usize) -> i32 {
+        let y_lo = self.oam_attr(sprite, 0) & 0xFF;
+        let y_hi = (self.oam_attr(sprite, 0) >> 8) & 1;
+        let y = (y_lo | (y_hi << 8)) as i32;
+        // Sign extend from 9 bits
+        if y >= 256 {
+            y - 512
+        } else {
+            y
         }
     }
 
-    pub fn get_sprite_y(&self, num: usize) -> u16 {
-        if num < 128 {
-            self.sprites[num].1
+    /// Get sprite X position (10-bit from attr1 bits 0-8 + attr1 bit 9 for MSB)
+    pub fn sprite_x(&self, sprite: usize) -> i32 {
+        let x_lo = self.oam_attr(sprite, 1) & 0x1FF;
+        let x_hi = (self.oam_attr(sprite, 1) >> 9) & 1;
+        let x = (x_lo | (x_hi << 9)) as i32;
+        // Sign extend from 10 bits
+        if x >= 512 {
+            x - 1024
+        } else {
+            x
+        }
+    }
+
+    /// Get sprite tile number (10-bit from attr2 bits 0-9)
+    pub fn sprite_tile(&self, sprite: usize) -> u16 {
+        self.oam_attr(sprite, 2) & 0x3FF
+    }
+
+    /// Get sprite priority (2-bit from attr2 bits 10-11)
+    pub fn sprite_priority(&self, sprite: usize) -> u16 {
+        (self.oam_attr(sprite, 2) >> 10) & 0x3
+    }
+
+    /// Get sprite palette number (4-bit from attr2 bits 12-15, only for 16-color mode)
+    pub fn sprite_palette(&self, sprite: usize) -> u16 {
+        (self.oam_attr(sprite, 2) >> 12) & 0xF
+    }
+
+    /// Check if sprite uses 256-color mode (attr0 bit 13 = 0 for 16-color, 1 for 256-color)
+    pub fn sprite_is_256color(&self, sprite: usize) -> bool {
+        (self.oam_attr(sprite, 0) & 0x2000) != 0
+    }
+
+    /// Check if sprite uses horizontal flip (attr1 bit 12, only for non-affine)
+    pub fn sprite_flip_h(&self, sprite: usize) -> bool {
+        (self.oam_attr(sprite, 1) & 0x1000) != 0
+    }
+
+    /// Check if sprite uses vertical flip (attr1 bit 13, only for non-affine)
+    pub fn sprite_flip_v(&self, sprite: usize) -> bool {
+        (self.oam_attr(sprite, 1) & 0x2000) != 0
+    }
+
+    /// Check if sprite is affine (rotation/scaling) mode (attr0 bit 12)
+    /// attr0 bit 12: 0 = non-affine, 1 = affine
+    pub fn sprite_is_affine(&self, sprite: usize) -> bool {
+        (self.oam_attr(sprite, 0) & 0x0100) != 0
+    }
+
+    /// Get affine parameter group index (0-31) from attr0 bits 9-13
+    /// Each affine parameter group is 4 halfwords (PA, PB, PC, PD)
+    /// 32 groups share space with 128 sprites in OAM
+    pub fn sprite_rotation_param(&self, sprite: usize) -> usize {
+        let attr1 = self.oam_attr(sprite, 1);
+        ((attr1 >> 9) & 0x1F) as usize
+    }
+
+    /// Get affine rotation parameter PA (4 halfwords per group, at OAM offset group*16+3)
+    pub fn sprite_affine_pa(&self, group: usize) -> i16 {
+        let offset = group * 16 + 6;
+        if offset + 1 < self.oam.len() {
+            i16::from_le_bytes([self.oam[offset], self.oam[offset + 1]])
+        } else {
+            0x100
+        }
+    }
+
+    /// Get affine rotation parameter PB
+    pub fn sprite_affine_pb(&self, group: usize) -> i16 {
+        let offset = group * 16 + 14;
+        if offset + 1 < self.oam.len() {
+            i16::from_le_bytes([self.oam[offset], self.oam[offset + 1]])
         } else {
             0
         }
     }
 
-    pub fn set_sprite_tile(&mut self, num: usize, tile: u16) {
-        if num < 128 {
-            self.sprites[num].2 = tile;
-        }
-    }
-
-    pub fn set_sprite_priority(&mut self, num: usize, priority: u16) {
-        if num < 128 {
-            self.sprites[num].3 = priority;
-        }
-    }
-
-    pub fn set_sprite_palette(&mut self, _num: usize, _palette: u16) {
-        // Stored in OAM in real implementation
-    }
-
-    pub fn set_sprite_enabled(&mut self, num: usize, enabled: bool) {
-        if num < 128 {
-            self.sprites[num].4 = enabled;
-        }
-    }
-
-    pub fn is_sprite_enabled(&self, num: usize) -> bool {
-        if num < 128 {
-            self.sprites[num].4
+    /// Get affine rotation parameter PC
+    pub fn sprite_affine_pc(&self, group: usize) -> i16 {
+        let offset = group * 16 + 22;
+        if offset + 1 < self.oam.len() {
+            i16::from_le_bytes([self.oam[offset], self.oam[offset + 1]])
         } else {
-            false
+            0
+        }
+    }
+
+    /// Get affine rotation parameter PD
+    pub fn sprite_affine_pd(&self, group: usize) -> i16 {
+        let offset = group * 16 + 30;
+        if offset + 1 < self.oam.len() {
+            i16::from_le_bytes([self.oam[offset], self.oam[offset + 1]])
+        } else {
+            0x100
+        }
+    }
+
+    /// Check if sprite is a sprite-type window mask (attr0 bits 14-15 == 10)
+    pub fn sprite_is_window(&self, sprite: usize) -> bool {
+        let mode = (self.oam_attr(sprite, 0) >> 14) & 0x3;
+        mode == 0b10
+    }
+
+    /// Apply OBJ mosaic to pixel coordinates
+    /// Returns the snapped dy value (within the sprite)
+    pub fn apply_obj_mosaic(&self, sprite_dy: u16, scanline: u16) -> u16 {
+        let mv = ((self.obj_mosaic >> 4) & 0xF) as u16;
+        if mv == 0 {
+            return sprite_dy;
+        }
+        let block_h = mv + 1;
+        let base_y = (scanline / block_h) * block_h;
+        let snapped_dy = base_y % 256;
+        snapped_dy
+    }
+
+    /// Get OBJ mosaic horizontal snap
+    pub fn apply_obj_mosaic_h(&self, sprite_dx: u16) -> u16 {
+        let mh = (self.obj_mosaic & 0xF) as u16;
+        if mh == 0 {
+            return sprite_dx;
+        }
+        let block_w = mh + 1;
+        (sprite_dx / block_w) * block_w
+    }
+
+    /// Get a pixel from an OBJ tile
+    /// obj_base: 0x10000 (OBJ VRAM starts at offset 0x10000 in VRAM)
+    /// tile_num: tile number
+    /// x, y: pixel within tile (0-7)
+    /// palette_num: palette number (0-15) for 4bpp, ignored for 8bpp
+    /// is_256color: true for 256-color mode
+    pub fn get_obj_tile_pixel(
+        &self,
+        tile_num: u16,
+        x: u8,
+        y: u8,
+        _palette_num: u16,
+        is_256color: bool,
+    ) -> u8 {
+        let obj_base = 0x10000; // OBJ tiles start at VRAM offset 0x10000
+        if is_256color {
+            // 8bpp: each tile is 64 bytes
+            let tile_offset = obj_base + (tile_num as usize * 64);
+            let pixel_offset = tile_offset + (y as usize * 8) + (x as usize);
+            if pixel_offset < self.vram.len() {
+                self.vram[pixel_offset]
+            } else {
+                0
+            }
+        } else {
+            // 4bpp: each tile is 32 bytes
+            let tile_offset = obj_base + (tile_num as usize * 32);
+            let row_offset = tile_offset + (y as usize * 4);
+            let byte_offset = row_offset + (x as usize / 2);
+            if byte_offset < self.vram.len() {
+                let byte = self.vram[byte_offset];
+                if x % 2 == 0 {
+                    byte & 0x0F
+                } else {
+                    (byte >> 4) & 0x0F
+                }
+            } else {
+                0
+            }
         }
     }
 
@@ -685,7 +988,7 @@ impl Ppu {
     /// Get palette color (RGB555) for the given palette index
     /// pal_num: 0 for BG palette, 1 for OBJ palette
     /// index: color index (0-255)
-    pub fn get_palette_color(&self, pal_num: usize, index: u16) -> u16 {
+    pub fn get_palette_color(&self, _pal_num: usize, _index: u16) -> u16 {
         // Palette is stored in Memory, not PPU
         // For now, we'll need to get this from Memory
         // This is a placeholder - the actual implementation will be in Gba
@@ -705,7 +1008,7 @@ impl Ppu {
         tile_num: u16,
         x: u8,
         y: u8,
-        palette_num: u16,
+        _palette_num: u16,
         flip_h: bool,
         flip_v: bool,
     ) -> u8 {
@@ -768,7 +1071,7 @@ impl Ppu {
         screen_base: usize,
         x: u16,
         y: u16,
-        bg_size: u16,
+        _bg_size: u16,
         width: u16,
         height: u16,
     ) -> u16 {
@@ -812,14 +1115,17 @@ impl Ppu {
         }
     }
 
-    /// Step the PPU and return true if VBlank just started
+    /// Step the PPU and return (vblank_started, hblank_started)
     /// VBlank starts at scanline 160 (when vcount transitions from 159 to 160)
-    pub fn step_vblank_check(&mut self, cycles: u32) -> bool {
+    /// HBlank starts when hcounter crosses 960 (visible pixels end)
+    pub fn step_vblank_check(&mut self, cycles: u32) -> (bool, bool) {
         let old_vcount = self.vcount;
+        let old_hblank = self.is_in_hblank();
 
         self.hcounter += cycles;
 
-        // Check for HBlank
+        let mut vblank_start = false;
+
         if self.hcounter >= 1232 {
             self.hcounter -= 1232;
             self.vcount += 1;
@@ -828,10 +1134,18 @@ impl Ppu {
             if self.vcount >= 228 {
                 self.vcount = 0;
             }
+
+            // VBlank starts when we transition from scanline 159 to 160
+            if old_vcount == 159 && self.vcount == 160 {
+                vblank_start = true;
+            }
         }
 
-        // VBlank starts when we transition from scanline 159 to 160
-        old_vcount == 159 && self.vcount == 160
+        // HBlank starts when hcounter crosses 960 (visible pixels end)
+        let new_hblank = self.is_in_hblank();
+        let hblank_start = !old_hblank && new_hblank;
+
+        (vblank_start, hblank_start)
     }
 }
 

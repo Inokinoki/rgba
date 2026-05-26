@@ -265,7 +265,10 @@ impl Gba {
 
         // Sync PPU state back to memory AFTER stepping, so DISPSTAT is up-to-date
         // This is critical for ROMs that poll DISPSTAT in tight loops
-        self.sync_ppu_to_mem();
+        // Only sync if CPU actually stepped (cycles > 0)
+        if cycles > 0 {
+            self.sync_ppu_to_mem();
+        }
 
         // Execute DMA transfers
         for i in 0..4 {

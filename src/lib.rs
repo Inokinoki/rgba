@@ -426,41 +426,64 @@ impl Gba {
     }
 
     /// Run one frame with parallel PPU rendering
-    /// CPU executes next scanline while PPU renders previous scanline
     pub fn run_frame_parallel(&mut self, framebuffer: &mut [u32]) {
-        use std::sync::mpsc;
         use std::thread;
 
         // Run 228 scanlines per frame (160 visible + 68 vblank)
-        for scanline in 0..228u16 {
-            // Create PPU snapshot for parallel rendering
-            let snapshot = self.ppu.snapshot();
-            let palette = *self.mem.palette();
-            let y = scanline;
-
-            // Spawn rendering thread for visible scanlines
-            let render_handle = if scanline < 160 {
-                let mut fb_slice = vec![0u32; 240];
-                let handle = thread::spawn(move || {
-                    Ppu::render_scanline_from_snapshot(&snapshot, y, &mut fb_slice, &palette);
-                    fb_slice
-                });
-                Some(handle)
-            } else {
-                None
-            };
-
-            // Execute CPU for this scanline (in parallel with PPU rendering)
+        // CPU executes all scanlines first
+        for _ in 0..228 {
             self.run_scanline();
+        }
 
-            // Wait for PPU rendering to complete and copy to framebuffer
-            if let Some(handle) = render_handle {
-                if let Ok(scanline_fb) = handle.join() {
-                    let start = scanline as usize * 240;
-                    let end = start + 240;
-                    if end <= framebuffer.len() {
-                        framebuffer[start..end].copy_from_slice(&scanline_fb);
-                    }
+        // Create PPU snapshot for parallel rendering
+        let snapshot = self.ppu.snapshot();
+        let palette = *self.mem.palette();
+
+        // Render all visible scanlines in parallel using thread pool
+        let num_threads = 4.min(
+            thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+        );
+        let scanlines_per_thread = 160 / num_threads;
+
+        let mut handles = Vec::with_capacity(num_threads);
+
+        for thread_id in 0..num_threads {
+            let start_line = thread_id * scanlines_per_thread;
+            let end_line = if thread_id == num_threads - 1 {
+                160
+            } else {
+                start_line + scanlines_per_thread
+            };
+            let snapshot_clone = snapshot.clone();
+            let palette_clone = palette;
+
+            let handle = thread::spawn(move || {
+                let mut results = Vec::with_capacity((end_line - start_line) * 240);
+                for scanline in start_line as u16..end_line as u16 {
+                    let mut line = vec![0u32; 240];
+                    Ppu::render_scanline_from_snapshot(
+                        &snapshot_clone,
+                        scanline,
+                        &mut line,
+                        &palette_clone,
+                    );
+                    results.extend_from_slice(&line);
+                }
+                (start_line, results)
+            });
+
+            handles.push(handle);
+        }
+
+        // Collect results and write to framebuffer
+        for handle in handles {
+            if let Ok((start_line, results)) = handle.join() {
+                let start = start_line * 240;
+                let end = start + results.len();
+                if end <= framebuffer.len() {
+                    framebuffer[start..end].copy_from_slice(&results);
                 }
             }
         }

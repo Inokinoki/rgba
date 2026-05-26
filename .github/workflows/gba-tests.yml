@@ -83,7 +83,6 @@ jobs:
   test:
     name: Run GBA tests
     runs-on: ${{ matrix.os }}
-    needs: examples
     strategy:
       fail-fast: false
       matrix:

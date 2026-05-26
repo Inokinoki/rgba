@@ -275,6 +275,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         window.update_with_buffer(&buffer, width, height).unwrap();
     }
 
+    // Verification: check ROM execution
+    if rom_path.is_some() {
+        let pc = gba.cpu().get_pc();
+        let r12 = gba.cpu().get_reg(12);
+        let non_zero_pixels = buffer.iter().filter(|&&p| p != 0).count();
+
+        println!("Verification:");
+        println!("  PC: 0x{:08X}", pc);
+        println!("  R12: {}", r12);
+        println!("  Non-zero pixels: {}/{}", non_zero_pixels, width * height);
+        println!("  Frames rendered: {}", frame_count);
+
+        if pc == 0 {
+            eprintln!("FAIL: PC is 0, ROM not executing");
+            std::process::exit(1);
+        }
+        if non_zero_pixels == 0 {
+            eprintln!("FAIL: framebuffer is blank, no rendering happened");
+            std::process::exit(1);
+        }
+        println!("PASS: ROM executed and rendered {} frames", frame_count);
+    }
+
     Ok(())
 }
 

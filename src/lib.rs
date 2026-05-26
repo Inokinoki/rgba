@@ -322,7 +322,7 @@ impl Gba {
     /// Run one scanline (1232 cycles) - batch execution for better performance
     pub fn run_scanline(&mut self) {
         const SCANLINE_CYCLES: u32 = 1232;
-        const BATCH_SIZE: u32 = 16; // Step peripherals every 16 cycles
+        const BATCH_SIZE: u32 = 4; // Step peripherals every 4 cycles
         let mut cycles_remaining = SCANLINE_CYCLES;
 
         // Sync once at start of scanline

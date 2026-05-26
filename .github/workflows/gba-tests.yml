@@ -1,0 +1,73 @@
+name: GBA Tests
+
+on:
+  push:
+    branches: [master, feat/*]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+  GBA_TESTS_REPO: https://github.com/jsmolka/gba-tests.git
+  GBA_TESTS_SHA: a7113b6
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      - name: Clone gba-tests
+        run: git clone ${{ env.GBA_TESTS_REPO }} gba-tests && cd gba-tests && git checkout ${{ env.GBA_TESTS_SHA }}
+        shell: bash
+
+      - name: Build
+        run: cargo build --example run_all_gba_tests --release
+        shell: bash
+
+      - name: Run GBA tests
+        run: cargo run --example run_all_gba_tests --release 2>&1 | tee results.txt
+        shell: bash
+
+      - name: Verify all tests pass
+        run: |
+          passed=$(grep -c "✓ PASS" results.txt || true)
+          failed=$(grep -c "✗ FAIL" results.txt || true)
+          echo "Passed: $passed, Failed: $failed"
+          if [ "$failed" -ne 0 ] || [ "$passed" -ne 13 ]; then
+            echo "ERROR: Expected 13 passed, 0 failed"
+            exit 1
+          fi
+        shell: bash
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-${{ matrix.os }}
+          path: results.txt

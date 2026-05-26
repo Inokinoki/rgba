@@ -73,9 +73,9 @@ jobs:
         run: |
           echo "=== Running gui_emulator ==="
           if [ "$RUNNER_OS" = "Linux" ]; then
-            xvfb-run cargo run --example gui_emulator --features gui -- --frames 5 || exit 1
+            xvfb-run cargo run --example gui_emulator --features gui -- --frames 60 gba-tests/ppu/hello.gba || exit 1
           else
-            cargo run --example gui_emulator --features gui -- --frames 5 || exit 1
+            cargo run --example gui_emulator --features gui -- --frames 60 gba-tests/ppu/hello.gba || exit 1
           fi
           echo ""
           echo "=== Running simple_gui_demo ==="

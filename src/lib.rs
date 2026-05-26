@@ -498,44 +498,34 @@ impl Gba {
 
     /// Sync IO register writes to component state (timers, DMA)
     fn sync_io_to_components(&mut self) {
-        let io = self.mem.io();
-
-        // Timer 0-3: TM0CNT_L/H (0x100-0x10F)
-        for i in 0..4 {
-            let base = 0x100 + (i * 4);
-            let control = u16::from_le_bytes([io[base + 2], io[base + 3]]);
-            let reload = u16::from_le_bytes([io[base], io[base + 1]]);
-
-            self.timers[i].set_control(control);
-            self.timers[i].set_reload(reload);
+        if self.mem.io_timer_dirty {
+            let io = self.mem.io();
+            for i in 0..4 {
+                let base = 0x100 + (i * 4);
+                let control = u16::from_le_bytes([io[base + 2], io[base + 3]]);
+                let reload = u16::from_le_bytes([io[base], io[base + 1]]);
+                self.timers[i].set_control(control);
+                self.timers[i].set_reload(reload);
+            }
+            self.mem.io_timer_dirty = false;
         }
 
-        // DMA 0-3: DMASAD, DMADAD, DMACNT_L, DMACNT_H
-        for i in 0..4 {
-            let base = 0xB0 + (i * 12);
-            let src = u32::from_le_bytes([io[base], io[base + 1], io[base + 2], io[base + 3]]);
-            let dst = u32::from_le_bytes([io[base + 4], io[base + 5], io[base + 6], io[base + 7]]);
-            let count = u16::from_le_bytes([io[base + 8], io[base + 9]]);
-            let control = u16::from_le_bytes([io[base + 10], io[base + 11]]);
-
-            self.dma[i].set_src_addr(src);
-            self.dma[i].set_dst_addr(dst);
-            self.dma[i].set_count(count);
-            self.dma[i].set_control(control);
+        if self.mem.io_dma_dirty {
+            let io = self.mem.io();
+            for i in 0..4 {
+                let base = 0xB0 + (i * 12);
+                let src = u32::from_le_bytes([io[base], io[base + 1], io[base + 2], io[base + 3]]);
+                let dst =
+                    u32::from_le_bytes([io[base + 4], io[base + 5], io[base + 6], io[base + 7]]);
+                let count = u16::from_le_bytes([io[base + 8], io[base + 9]]);
+                let control = u16::from_le_bytes([io[base + 10], io[base + 11]]);
+                self.dma[i].set_src_addr(src);
+                self.dma[i].set_dst_addr(dst);
+                self.dma[i].set_count(count);
+                self.dma[i].set_control(control);
+            }
+            self.mem.io_dma_dirty = false;
         }
-
-        // Blending registers
-        // BLDCNT (0x0400_0050) - 2 bytes at offset 0x50
-        let bldcnt = u16::from_le_bytes([io[0x50], io[0x51]]);
-        self.ppu.set_blend_control(bldcnt);
-
-        // BLDALPHA (0x0400_0052) - 2 bytes at offset 0x52
-        let bldalpha = u16::from_le_bytes([io[0x52], io[0x53]]);
-        self.ppu.set_blend_alpha(bldalpha);
-
-        // BLDY (0x0400_0054) - 2 bytes at offset 0x54
-        let bldy = u16::from_le_bytes([io[0x54], io[0x55]]);
-        self.ppu.set_blend_brightness(bldy);
     }
 
     /// Sync PPU state from Memory (full)

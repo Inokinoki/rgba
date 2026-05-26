@@ -320,9 +320,7 @@ impl Gba {
     }
 
     /// Run one scanline (1232 cycles) - batch execution for better performance
-    /// This reduces function call overhead from 280k calls/frame to ~228 calls/frame
     pub fn run_scanline(&mut self) {
-        // One scanline = 1232 cycles (240 pixels × 4 cycles + hblank)
         const SCANLINE_CYCLES: u32 = 1232;
         let mut cycles_remaining = SCANLINE_CYCLES;
 
@@ -332,14 +330,13 @@ impl Gba {
         self.sync_ppu();
         self.sync_ppu_to_mem();
 
+        // Inner loop: CPU + PPU + timers (must step together for correct timing)
         while cycles_remaining > 0 {
-            // Check for HALT state
             if self.mem.halt_pending {
                 self.cpu.set_halted();
                 self.mem.halt_pending = false;
             }
 
-            // Check if we should take an interrupt
             if self.mem.interrupt.should_take_interrupt() {
                 if self.cpu.is_halted() {
                     self.cpu.clear_halted();
@@ -368,7 +365,7 @@ impl Gba {
                 self.mem.interrupt.request(Interrupt::HBLANK);
             }
 
-            self.apu.step(cycles);
+            // Step timers
             for i in 0..4 {
                 self.timers[i].step(cycles);
                 if self.timers[i].did_overflow() {
@@ -387,13 +384,8 @@ impl Gba {
                 }
             }
 
-            // Check dirty flags - if CPU wrote to IO/VRAM/OAM, sync mid-scanline
-            if self.mem.io_ppu_dirty || self.mem.vram_dirty || self.mem.oam_dirty {
-                self.sync_ppu();
-            }
-            if self.mem.io_timer_dirty || self.mem.io_dma_dirty {
-                self.sync_io_to_components();
-            }
+            // Step APU
+            self.apu.step(cycles);
         }
 
         // Sync PPU state back to memory at end of scanline

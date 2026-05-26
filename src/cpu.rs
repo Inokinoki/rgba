@@ -425,15 +425,15 @@ impl Cpu {
     fn step_arm(&mut self, mem: &mut super::Memory) -> u32 {
         if !self.pipeline_loaded {
             self.pipeline_pc[0] = self.r[15];
-            self.pipeline[0] = mem.read_word(self.r[15]);
+            self.pipeline[0] = mem.read_word_fast(self.r[15]);
 
             let n1 = self.r[15].wrapping_add(4);
             self.pipeline_pc[1] = n1;
-            self.pipeline[1] = mem.read_word(n1);
+            self.pipeline[1] = mem.read_word_fast(n1);
 
             let n2 = self.r[15].wrapping_add(8);
             self.pipeline_pc[2] = n2;
-            self.pipeline[2] = mem.read_word(n2);
+            self.pipeline[2] = mem.read_word_fast(n2);
 
             self.pipeline_loaded = true;
         }
@@ -459,7 +459,7 @@ impl Cpu {
 
             let fetch_pc = instruction_pc.wrapping_add(12);
             self.pipeline_pc[2] = fetch_pc;
-            self.pipeline[2] = mem.read_word(fetch_pc);
+            self.pipeline[2] = mem.read_word_fast(fetch_pc);
 
             self.r[15] = instruction_pc.wrapping_add(4);
         }

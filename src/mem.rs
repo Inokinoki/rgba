@@ -636,6 +636,50 @@ impl Memory {
         self.write_byte_internal(addr + 1, bytes[1]);
     }
 
+    /// Read a word from memory (optimized fast path for ROM/IWRAM)
+    #[inline(always)]
+    pub fn read_word_fast(&mut self, addr: u32) -> u32 {
+        match addr {
+            // ROM WS0 - most common for instruction fetch
+            0x0800_0000..=0x09FF_FFFF => {
+                let offset = (addr - 0x0800_0000) as usize;
+                if offset + 3 < self.rom.len() {
+                    unsafe {
+                        let ptr = self.rom.as_ptr().add(offset);
+                        u32::from_le_bytes([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)])
+                    }
+                } else {
+                    self.read_word(addr)
+                }
+            }
+            // IWRAM - fast access for stack
+            0x0300_0000..=0x03FF_FFFF => {
+                let offset = (addr - 0x0300_0000) as usize;
+                if offset + 3 < self.iwram.len() {
+                    unsafe {
+                        let ptr = self.iwram.as_ptr().add(offset);
+                        u32::from_le_bytes([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)])
+                    }
+                } else {
+                    self.read_word(addr)
+                }
+            }
+            // WRAM
+            0x0200_0000..=0x02FF_FFFF => {
+                let offset = (addr - 0x0200_0000) as usize;
+                if offset + 3 < self.wram.len() {
+                    unsafe {
+                        let ptr = self.wram.as_ptr().add(offset);
+                        u32::from_le_bytes([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)])
+                    }
+                } else {
+                    self.read_word(addr)
+                }
+            }
+            _ => self.read_word(addr),
+        }
+    }
+
     /// Read a word (32-bit) from memory
     pub fn read_word(&mut self, addr: u32) -> u32 {
         if addr >= 0x0E00_0000 && addr < 0x1000_0000 {

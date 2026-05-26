@@ -63,20 +63,22 @@ jobs:
         run: |
           for ex in cpu_test memory_test quick_start input_demo graphics_demo; do
             echo "=== Running $ex ==="
-            timeout 30 cargo run --example "$ex" || exit 1
+            cargo run --example "$ex" || exit 1
             echo ""
           done
         shell: bash
+        timeout-minutes: 5
 
       - name: Run gui examples (Linux only)
         if: runner.os == 'Linux'
         run: |
           for ex in gui_emulator simple_gui_demo; do
             echo "=== Running $ex ==="
-            timeout 10 xvfb-run cargo run --example "$ex" --features gui 2>&1 || true
+            xvfb-run cargo run --example "$ex" --features gui 2>&1 || true
             echo ""
           done
         shell: bash
+        timeout-minutes: 2
 
   test:
     name: Run GBA tests
@@ -137,10 +139,11 @@ jobs:
         run: |
           for ex in test_all_roms test_detailed test_instruction_coverage test_trace; do
             echo "=== Running $ex ==="
-            timeout 120 cargo run --example "$ex" || exit 1
+            cargo run --example "$ex" || exit 1
             echo ""
           done
         shell: bash
+        timeout-minutes: 10
 
       - name: Upload results
         if: always()

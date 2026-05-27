@@ -316,6 +316,39 @@ impl Memory {
         }
     }
 
+    /// Clear EWRAM (0x02000000-0x0203FFFF)
+    pub fn clear_ewram(&mut self) {
+        self.wram.fill(0);
+    }
+
+    /// Clear IWRAM (0x03000000-0x03007FFF, except top 8 bytes)
+    pub fn clear_iwram(&mut self) {
+        // Don't clear the top 8 bytes (0x03007FF8-0x03007FFF) - used for BIOS communication
+        self.iwram[..0x7FF8].fill(0);
+    }
+
+    /// Clear Palette (0x05000000-0x050003FF)
+    pub fn clear_palette(&mut self) {
+        self.palette.fill(0);
+    }
+
+    /// Clear VRAM (0x06000000-0x06017FFF)
+    pub fn clear_vram(&mut self) {
+        self.vram.fill(0);
+    }
+
+    /// Clear OAM (0x07000000-0x070003FF)
+    pub fn clear_oam(&mut self) {
+        self.oam.fill(0);
+    }
+
+    /// Clear IO registers (0x04000000-0x040003FE, except some)
+    pub fn clear_io(&mut self) {
+        // Don't clear some registers that should persist
+        // (e.g., POSTFLG, WAITCNT, etc.)
+        self.io.fill(0);
+    }
+
     pub fn load_rom(&mut self, data: Vec<u8>) {
         self.rom = data;
     }

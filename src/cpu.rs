@@ -1666,7 +1666,33 @@ impl Cpu {
             }
             0x01 => {
                 // RegisterRamReset - reset memory regions
-                // Just return to caller
+                // R0 contains bitfield specifying which regions to reset
+                let reset_flags = self.r[0];
+
+                // Bit 0: Reset EWRAM
+                if reset_flags & 0x01 != 0 {
+                    mem.clear_ewram();
+                }
+                // Bit 1: Reset IWRAM (except top 8 bytes)
+                if reset_flags & 0x02 != 0 {
+                    mem.clear_iwram();
+                }
+                // Bit 2: Reset Palette
+                if reset_flags & 0x04 != 0 {
+                    mem.clear_palette();
+                }
+                // Bit 3: Reset VRAM
+                if reset_flags & 0x08 != 0 {
+                    mem.clear_vram();
+                }
+                // Bit 4: Reset OAM
+                if reset_flags & 0x10 != 0 {
+                    mem.clear_oam();
+                }
+                // Bit 5: Reset IO registers (except some)
+                if reset_flags & 0x20 != 0 {
+                    mem.clear_io();
+                }
             }
             0x02 | 0x03 => {
                 // Halt / Stop - wait for interrupt

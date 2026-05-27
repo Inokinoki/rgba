@@ -176,6 +176,13 @@ impl Cpu {
     }
 
     pub fn take_interrupt(&mut self, mem: &mut super::Memory) {
+        let isr_addr = mem.read_word(0x0300_7FFC);
+
+        // Don't take interrupt if handler is not set up (address is 0 or invalid)
+        if isr_addr == 0 || isr_addr < 0x02000000 {
+            return;
+        }
+
         let old_cpsr = self.cpsr;
         let ret_addr = self.get_pc();
 
@@ -189,7 +196,6 @@ impl Cpu {
 
         self.cpsr |= 0x80;
 
-        let isr_addr = mem.read_word(0x0300_7FFC);
         self.set_pc(isr_addr);
         self.pipeline_loaded = false;
     }

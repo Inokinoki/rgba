@@ -1207,9 +1207,11 @@ impl Ppu {
         for x in 0..width {
             colors_15bit[x] = match mode {
                 0 | 1 | 2 => {
-                    Self::render_tile_pixel_from_snapshot(snapshot, x as u16, y as u16, palette)
+                    // Tile modes - render all BG layers and composite
+                    Self::render_tile_pixel_composited(snapshot, x as u16, y as u16, palette)
                 }
                 3 => {
+                    // Mode 3: 16-bit bitmap (240x160)
                     let offset = (y * 240 + x) * 2;
                     if offset + 1 < snapshot.vram.len() {
                         u16::from_le_bytes([snapshot.vram[offset], snapshot.vram[offset + 1]])
@@ -1218,12 +1220,36 @@ impl Ppu {
                     }
                 }
                 4 => {
-                    let offset = y * 240 + x;
+                    // Mode 4: 8-bit paletted bitmap (240x160, double buffered)
+                    let page = if snapshot.dispcnt & (1 << 4) != 0 {
+                        0xA000
+                    } else {
+                        0
+                    };
+                    let offset = page + y * 240 + x;
                     if offset < snapshot.vram.len() {
                         let idx = snapshot.vram[offset] as usize;
                         let pal_offset = idx * 2;
                         if pal_offset + 1 < palette.len() {
                             u16::from_le_bytes([palette[pal_offset], palette[pal_offset + 1]])
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    }
+                }
+                5 => {
+                    // Mode 5: 16-bit bitmap (160x128, double buffered)
+                    let page = if snapshot.dispcnt & (1 << 4) != 0 {
+                        0xA000
+                    } else {
+                        0
+                    };
+                    if x < 160 && y < 128 {
+                        let offset = page + (y * 160 + x) * 2;
+                        if offset + 1 < snapshot.vram.len() {
+                            u16::from_le_bytes([snapshot.vram[offset], snapshot.vram[offset + 1]])
                         } else {
                             0
                         }
@@ -1237,6 +1263,355 @@ impl Ppu {
 
         // Batch convert 15-bit to 32-bit ARGB
         Self::convert_colors_15bit_to_argb(&colors_15bit, framebuffer);
+    }
+
+    /// Render a pixel from tile mode with multi-layer compositing
+    fn render_tile_pixel_composited(
+        snapshot: &PpuSnapshot,
+        x: u16,
+        y: u16,
+        palette: &[u8; 0x400],
+    ) -> u16 {
+        // Collect enabled backgrounds with their priorities
+        let mut bg_layers: [(u8, u16); 4] = [(0, 0); 4]; // (bg_idx, priority)
+        let mut layer_count = 0;
+
+        for bg in 0..4 {
+            if snapshot.dispcnt & (1 << (8 + bg)) != 0 {
+                let priority = snapshot.bgcnt[bg] & 0x3;
+                bg_layers[layer_count] = (bg as u8, priority);
+                layer_count += 1;
+            }
+        }
+
+        // Sort by priority (lower number = higher priority)
+        bg_layers[..layer_count].sort_by_key(|&(_, pri)| pri);
+
+        // Render each layer and composite
+        let mut bg_color = 0u16;
+        let mut bg_priority = 4u16; // Start with lowest priority
+
+        for &(bg_idx, priority) in &bg_layers[..layer_count] {
+            let color = Self::render_bg_pixel(snapshot, bg_idx as usize, x, y, palette);
+            if color != 0 {
+                bg_color = color;
+                bg_priority = priority;
+                break; // Found non-transparent pixel
+            }
+        }
+
+        // Render sprites if OBJ is enabled
+        if snapshot.dispcnt & (1 << 12) != 0 {
+            let sprite_color = Self::render_sprite_pixel(snapshot, x, y, palette, bg_priority);
+            if sprite_color != 0 {
+                return sprite_color;
+            }
+        }
+
+        // Return background color or backdrop
+        if bg_color != 0 {
+            bg_color
+        } else {
+            // All layers transparent, return backdrop color (palette[0])
+            if palette.len() >= 2 {
+                u16::from_le_bytes([palette[0], palette[1]])
+            } else {
+                0
+            }
+        }
+    }
+
+    /// Render a sprite pixel at the given position
+    fn render_sprite_pixel(
+        snapshot: &PpuSnapshot,
+        x: u16,
+        y: u16,
+        palette: &[u8; 0x400],
+        max_priority: u16,
+    ) -> u16 {
+        // OBJ VRAM starts at 0x10000 in VRAM
+        let obj_tile_base = 0x10000;
+
+        // Iterate through all 128 sprites (in reverse order for priority)
+        for sprite in (0..128).rev() {
+            // Check if sprite is enabled
+            let attr0 = Self::oam_attr_from_data(&snapshot.oam, sprite, 0);
+            let mode = (attr0 >> 14) & 0x3;
+            if mode == 0b10 {
+                continue; // Disabled
+            }
+
+            // Get sprite priority
+            let attr2 = Self::oam_attr_from_data(&snapshot.oam, sprite, 2);
+            let sprite_priority = (attr2 >> 10) & 0x3;
+
+            // Skip if sprite priority is lower than background priority
+            if sprite_priority > max_priority {
+                continue;
+            }
+
+            // Get sprite position
+            let attr1 = Self::oam_attr_from_data(&snapshot.oam, sprite, 1);
+            let sy = Self::sprite_y_from_attr(attr0);
+            let sx = Self::sprite_x_from_attr(attr1);
+
+            // Get sprite dimensions
+            let shape = (attr0 >> 14) & 0x3;
+            let size = (attr1 >> 14) & 0x3;
+            let (width, height) = Self::sprite_dimensions_from_shape_size(shape, size);
+
+            // Check if pixel is within sprite bounds
+            let dx = x as i32 - sx;
+            let dy = y as i32 - sy;
+
+            if dx < 0 || dx >= width as i32 || dy < 0 || dy >= height as i32 {
+                continue;
+            }
+
+            // Get tile number and palette
+            let tile_num = attr2 & 0x3FF;
+            let palette_num = (attr2 >> 12) & 0xF;
+            let is_256color = (attr0 & 0x2000) != 0;
+
+            // Check for flipping
+            let flip_h = (attr1 & 0x1000) != 0;
+            let flip_v = (attr1 & 0x2000) != 0;
+
+            let mut px = dx as u16;
+            let mut py = dy as u16;
+
+            if flip_h {
+                px = width - 1 - px;
+            }
+            if flip_v {
+                py = height - 1 - py;
+            }
+
+            // Calculate tile number based on position
+            let tile_x = px / 8;
+            let tile_y = py / 8;
+            let pixel_x = (px % 8) as u8;
+            let pixel_y = (py % 8) as u8;
+
+            // For 256-color sprites, tiles are laid out differently
+            let actual_tile = if is_256color {
+                // 256-color: tiles are 8x8 but stored linearly
+                let tiles_per_row = width / 8;
+                tile_num + tile_y * tiles_per_row + tile_x
+            } else {
+                // 16-color: tiles are stored in 2D blocks
+                tile_num + tile_y * (width / 8) + tile_x
+            };
+
+            // Get pixel color
+            let color_idx = if is_256color {
+                // 8bpp
+                let tile_offset = obj_tile_base + (actual_tile as usize * 64);
+                let pixel_offset = tile_offset + (pixel_y as usize * 8) + (pixel_x as usize);
+                if pixel_offset < snapshot.vram.len() {
+                    snapshot.vram[pixel_offset] as usize
+                } else {
+                    0
+                }
+            } else {
+                // 4bpp
+                let tile_offset = obj_tile_base + (actual_tile as usize * 32);
+                let row_offset = tile_offset + (pixel_y as usize * 4);
+                let nibble = if pixel_x % 2 == 0 {
+                    if row_offset + (pixel_x as usize / 2) < snapshot.vram.len() {
+                        snapshot.vram[row_offset + (pixel_x as usize / 2)] & 0x0F
+                    } else {
+                        0
+                    }
+                } else {
+                    if row_offset + (pixel_x as usize / 2) < snapshot.vram.len() {
+                        snapshot.vram[row_offset + (pixel_x as usize / 2)] >> 4
+                    } else {
+                        0
+                    }
+                };
+                if nibble == 0 {
+                    continue; // Transparent
+                }
+                (palette_num as usize * 16 + nibble as usize) & 0xFF
+            };
+
+            // Look up color in OBJ palette (starts at 0x200 in palette RAM)
+            let pal_offset = if is_256color {
+                color_idx * 2
+            } else {
+                (0x200 + color_idx * 2) & 0x3FF
+            };
+
+            if pal_offset + 1 < palette.len() {
+                let color = u16::from_le_bytes([palette[pal_offset], palette[pal_offset + 1]]);
+                if color != 0 {
+                    return color;
+                }
+            }
+        }
+
+        0
+    }
+
+    /// Helper to read OAM attribute
+    fn oam_attr_from_data(oam: &[u8; 0x400], sprite: usize, attr: usize) -> u16 {
+        let offset = sprite * 8 + attr * 2;
+        if offset + 1 < oam.len() {
+            u16::from_le_bytes([oam[offset], oam[offset + 1]])
+        } else {
+            0
+        }
+    }
+
+    /// Get sprite Y position from attr0
+    fn sprite_y_from_attr(attr0: u16) -> i32 {
+        let y = (attr0 & 0xFF) as i32;
+        if y >= 160 {
+            y - 256
+        } else {
+            y
+        }
+    }
+
+    /// Get sprite X position from attr1
+    fn sprite_x_from_attr(attr1: u16) -> i32 {
+        let x = (attr1 & 0x1FF) as i32;
+        if x >= 240 {
+            x - 512
+        } else {
+            x
+        }
+    }
+
+    /// Get sprite dimensions from shape and size
+    fn sprite_dimensions_from_shape_size(shape: u16, size: u16) -> (u16, u16) {
+        const DIMENSIONS: [[[u16; 2]; 4]; 4] = [
+            [[8, 8], [16, 16], [32, 32], [64, 64]], // shape 0 (square)
+            [[16, 8], [32, 8], [32, 16], [64, 32]], // shape 1 (horizontal)
+            [[8, 16], [8, 32], [16, 32], [32, 64]], // shape 2 (vertical)
+            [[8, 8], [16, 16], [32, 32], [64, 64]], // shape 3 (prohibited)
+        ];
+        let w = DIMENSIONS[shape as usize][size as usize][0];
+        let h = DIMENSIONS[shape as usize][size as usize][1];
+        (w, h)
+    }
+
+    /// Render a pixel from a specific background layer
+    fn render_bg_pixel(
+        snapshot: &PpuSnapshot,
+        bg_idx: usize,
+        x: u16,
+        y: u16,
+        palette: &[u8; 0x400],
+    ) -> u16 {
+        let bgcnt = snapshot.bgcnt[bg_idx];
+        let hofs = snapshot.bg_hofs[bg_idx];
+        let vofs = snapshot.bg_vofs[bg_idx];
+
+        // Calculate tile map dimensions based on BG size
+        let bg_size = bgcnt & 0x3;
+        let (map_width, map_height) = match bg_size {
+            0 => (256, 256), // 32x32 tiles
+            1 => (512, 256), // 64x32 tiles
+            2 => (256, 512), // 32x64 tiles
+            3 => (512, 512), // 64x64 tiles
+            _ => (256, 256),
+        };
+
+        // Calculate pixel position with scrolling
+        let px = (x.wrapping_add(hofs)) % map_width;
+        let py = (y.wrapping_add(vofs)) % map_height;
+
+        // Calculate tile position
+        let tile_x = px / 8;
+        let tile_y = py / 8;
+        let pixel_in_tile_x = (px % 8) as u8;
+        let pixel_in_tile_y = (py % 8) as u8;
+
+        // Get tile base and map base from BGCNT
+        let char_base = ((bgcnt >> 2) & 0x3) as usize * 0x4000;
+        let screen_base = ((bgcnt >> 8) & 0x1F) as usize * 0x800;
+
+        // Calculate screen entry offset
+        let tiles_per_row = map_width / 8;
+        let entry_offset = screen_base + ((tile_y * tiles_per_row + tile_x) as usize * 2);
+
+        // Read screen entry
+        if entry_offset + 1 >= snapshot.vram.len() {
+            return 0;
+        }
+        let entry =
+            u16::from_le_bytes([snapshot.vram[entry_offset], snapshot.vram[entry_offset + 1]]);
+
+        // Parse screen entry
+        let tile_num = entry & 0x3FF;
+        let flip_h = (entry & 0x400) != 0;
+        let flip_v = (entry & 0x800) != 0;
+        let palette_num = (entry >> 12) & 0xF;
+
+        // Determine if 4bpp or 8bpp based on BGCNT bit 7
+        let is_8bpp = (bgcnt >> 7) & 1 != 0;
+
+        let color_idx = if is_8bpp {
+            // 8bpp: 256 colors, no palette selection
+            let tile_offset = char_base + (tile_num as usize * 64);
+            let fx = if flip_h {
+                7 - pixel_in_tile_x
+            } else {
+                pixel_in_tile_x
+            };
+            let fy = if flip_v {
+                7 - pixel_in_tile_y
+            } else {
+                pixel_in_tile_y
+            };
+            let pixel_offset = tile_offset + (fy as usize * 8) + (fx as usize);
+            if pixel_offset < snapshot.vram.len() {
+                snapshot.vram[pixel_offset] as usize
+            } else {
+                0
+            }
+        } else {
+            // 4bpp: 16 colors per palette
+            let tile_offset = char_base + (tile_num as usize * 32);
+            let fx = if flip_h {
+                7 - pixel_in_tile_x
+            } else {
+                pixel_in_tile_x
+            };
+            let fy = if flip_v {
+                7 - pixel_in_tile_y
+            } else {
+                pixel_in_tile_y
+            };
+            let row_offset = tile_offset + (fy as usize * 4);
+            let nibble = if fx % 2 == 0 {
+                if row_offset + (fx as usize / 2) < snapshot.vram.len() {
+                    snapshot.vram[row_offset + (fx as usize / 2)] & 0x0F
+                } else {
+                    0
+                }
+            } else {
+                if row_offset + (fx as usize / 2) < snapshot.vram.len() {
+                    snapshot.vram[row_offset + (fx as usize / 2)] >> 4
+                } else {
+                    0
+                }
+            };
+            if nibble == 0 {
+                return 0; // Transparent
+            }
+            (palette_num as usize * 16 + nibble as usize) & 0xFF
+        };
+
+        // Look up color in palette
+        let pal_offset = color_idx * 2;
+        if pal_offset + 1 < palette.len() {
+            u16::from_le_bytes([palette[pal_offset], palette[pal_offset + 1]])
+        } else {
+            0
+        }
     }
 
     /// Convert 15-bit RGB colors to 32-bit ARGB using SIMD when available

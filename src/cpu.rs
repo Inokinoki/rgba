@@ -1647,6 +1647,12 @@ impl Cpu {
             swi_func & 0xFF
         };
 
+        // Debug: print SWI calls
+        eprintln!(
+            "SWI 0x{:02X} at PC 0x{:08X}, LR=0x{:08X}",
+            swi_num, instruction_pc, self.r[14]
+        );
+
         // Set BIOS read return value for open bus
         mem.set_bios_read_return(0xE25EF004);
 

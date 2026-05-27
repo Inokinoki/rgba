@@ -1334,13 +1334,133 @@ impl Ppu {
 
     fn render_tile_pixel_from_snapshot(
         snapshot: &PpuSnapshot,
-        _x: u16,
-        _y: u16,
-        _palette: &[u8; 0x400],
+        x: u16,
+        y: u16,
+        palette: &[u8; 0x400],
     ) -> u16 {
-        // Simplified tile rendering - just return 0 for now
-        // Full implementation would need to read tile data from snapshot.vram
-        0
+        // Render BG0 (simplified - just render the first enabled background)
+        let mode = (snapshot.dispcnt & 0x7) as u8;
+
+        // Find the first enabled background
+        let bg_idx = if snapshot.dispcnt & (1 << 8) != 0 {
+            0
+        } else if snapshot.dispcnt & (1 << 9) != 0 {
+            1
+        } else if snapshot.dispcnt & (1 << 10) != 0 {
+            2
+        } else if snapshot.dispcnt & (1 << 11) != 0 {
+            3
+        } else {
+            return 0;
+        }; // No background enabled
+
+        let bgcnt = snapshot.bgcnt[bg_idx];
+        let hofs = snapshot.bg_hofs[bg_idx];
+        let vofs = snapshot.bg_vofs[bg_idx];
+
+        // Calculate tile map dimensions based on BG size
+        let bg_size = bgcnt & 0x3;
+        let (map_width, map_height) = match bg_size {
+            0 => (256, 256), // 32x32 tiles
+            1 => (512, 256), // 64x32 tiles
+            2 => (256, 512), // 32x64 tiles
+            3 => (512, 512), // 64x64 tiles
+            _ => (256, 256),
+        };
+
+        // Calculate pixel position with scrolling
+        let px = (x.wrapping_add(hofs)) % map_width;
+        let py = (y.wrapping_add(vofs)) % map_height;
+
+        // Calculate tile position
+        let tile_x = px / 8;
+        let tile_y = py / 8;
+        let pixel_in_tile_x = (px % 8) as u8;
+        let pixel_in_tile_y = (py % 8) as u8;
+
+        // Get tile base and map base from BGCNT
+        let char_base = ((bgcnt >> 2) & 0x3) as usize * 0x4000;
+        let screen_base = ((bgcnt >> 8) & 0x1F) as usize * 0x800;
+
+        // Calculate screen entry offset
+        let tiles_per_row = map_width / 8;
+        let entry_offset = screen_base + ((tile_y * tiles_per_row + tile_x) as usize * 2);
+
+        // Read screen entry
+        if entry_offset + 1 >= snapshot.vram.len() {
+            return 0;
+        }
+        let entry =
+            u16::from_le_bytes([snapshot.vram[entry_offset], snapshot.vram[entry_offset + 1]]);
+
+        // Parse screen entry
+        let tile_num = entry & 0x3FF;
+        let flip_h = (entry & 0x400) != 0;
+        let flip_v = (entry & 0x800) != 0;
+        let palette_num = (entry >> 12) & 0xF;
+
+        // Determine if 4bpp or 8bpp based on mode
+        let is_8bpp = (bgcnt >> 7) & 1 != 0;
+
+        let color_idx = if is_8bpp {
+            // 8bpp: 256 colors, no palette selection
+            let tile_offset = char_base + (tile_num as usize * 64);
+            let fx = if flip_h {
+                7 - pixel_in_tile_x
+            } else {
+                pixel_in_tile_x
+            };
+            let fy = if flip_v {
+                7 - pixel_in_tile_y
+            } else {
+                pixel_in_tile_y
+            };
+            let pixel_offset = tile_offset + (fy as usize * 8) + (fx as usize);
+            if pixel_offset < snapshot.vram.len() {
+                snapshot.vram[pixel_offset] as usize
+            } else {
+                0
+            }
+        } else {
+            // 4bpp: 16 colors per palette
+            let tile_offset = char_base + (tile_num as usize * 32);
+            let fx = if flip_h {
+                7 - pixel_in_tile_x
+            } else {
+                pixel_in_tile_x
+            };
+            let fy = if flip_v {
+                7 - pixel_in_tile_y
+            } else {
+                pixel_in_tile_y
+            };
+            let row_offset = tile_offset + (fy as usize * 4);
+            let nibble = if fx % 2 == 0 {
+                if row_offset + (fx as usize / 2) < snapshot.vram.len() {
+                    snapshot.vram[row_offset + (fx as usize / 2)] & 0x0F
+                } else {
+                    0
+                }
+            } else {
+                if row_offset + (fx as usize / 2) < snapshot.vram.len() {
+                    snapshot.vram[row_offset + (fx as usize / 2)] >> 4
+                } else {
+                    0
+                }
+            };
+            if nibble == 0 {
+                return 0; // Transparent
+            }
+            (palette_num as usize * 16 + nibble as usize) & 0xFF
+        };
+
+        // Look up color in palette
+        let pal_offset = color_idx * 2;
+        if pal_offset + 1 < palette.len() {
+            u16::from_le_bytes([palette[pal_offset], palette[pal_offset + 1]])
+        } else {
+            0
+        }
     }
 }
 

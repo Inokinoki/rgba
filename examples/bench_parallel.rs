@@ -26,6 +26,10 @@ fn main() {
     println!("ROM at 0x08000004: 0x{:08X}", word1);
     println!("CPU PC after reset: 0x{:08X}", gba.cpu().get_pc());
 
+    // Check interrupt vector table
+    let irq_handler = gba.mem_mut().read_word(0x03007FFC);
+    println!("IRQ handler at 0x03007FFC: 0x{:08X}", irq_handler);
+
     // Run a few steps and check state
     for i in 0..10000 {
         gba.step();

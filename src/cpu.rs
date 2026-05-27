@@ -454,6 +454,13 @@ impl Cpu {
         let instruction_pc = self.pipeline_pc[0];
         let opcode = self.pipeline[0];
 
+        if instruction_pc >= 0x080000E0 && instruction_pc <= 0x08000D70 {
+            eprintln!(
+                "step_arm: opcode=0x{:08X}, pc=0x{:08X}",
+                opcode, instruction_pc
+            );
+        }
+
         self.trace_record(instruction_pc, opcode);
 
         self.pc_written = false;
@@ -462,6 +469,10 @@ impl Cpu {
         let cycles = self.execute_arm_with_pc(opcode, mem, instruction_pc, self.r[15]);
 
         if self.pc_written {
+            eprintln!(
+                "step_arm: pc_written=true, pipeline will reload from 0x{:08X}",
+                self.r[15]
+            );
             self.pipeline_loaded = false;
         } else {
             self.pipeline[0] = self.pipeline[1];
@@ -510,6 +521,10 @@ impl Cpu {
 
                 if (opcode & 0x0FFF_FFF0) == 0x012F_FF10 {
                     // Branch and exchange
+                    eprintln!(
+                        "BX decode: opcode=0x{:08X}, pc=0x{:08X}",
+                        opcode, instruction_pc
+                    );
                     self.execute_arm_bx(opcode, mem)
                 } else if (opcode >> 25) & 0x7 == 0b000 && ((opcode >> 4) & 0xF) != 0x9 {
                     let bit4 = (opcode & 0x0000_0010) != 0;
@@ -1281,10 +1296,11 @@ impl Cpu {
 
         #[cfg(debug_assertions)]
         eprintln!(
-            "BX: R{} = 0x{:08X}, Thumb bit = {}",
+            "BX: R{} = 0x{:08X}, Thumb bit = {}, mode={:?}",
             rm,
             target,
-            (target & 1) != 0
+            (target & 1) != 0,
+            self.get_mode()
         );
 
         if self.get_mode() == Mode::Irq {
@@ -1322,6 +1338,11 @@ impl Cpu {
 
         self.set_thumb_mode((target & 1) != 0);
         self.set_pc(target);
+        eprintln!(
+            "BX: jumping to 0x{:08X}, thumb={}",
+            target,
+            (target & 1) != 0
+        );
 
         2
     }
@@ -1655,8 +1676,8 @@ impl Cpu {
 
         // Debug: print SWI calls
         eprintln!(
-            "SWI 0x{:02X} at PC 0x{:08X}, LR=0x{:08X}",
-            swi_num, instruction_pc, self.r[14]
+            "SWI 0x{:02X} at PC 0x{:08X}, LR=0x{:08X}, R0=0x{:08X}",
+            swi_num, instruction_pc, self.r[14], self.r[0]
         );
 
         // Set BIOS read return value for open bus
@@ -1829,7 +1850,9 @@ impl Cpu {
         }
 
         // Return to caller (LR contains return address)
-        self.r[15] = self.r[14];
+        let ret_addr = self.r[14];
+        eprintln!("SWI returning to 0x{:08X}", ret_addr);
+        self.r[15] = ret_addr;
         3 // SWI takes 3 cycles
     }
 
@@ -1837,6 +1860,7 @@ impl Cpu {
         // Load pipeline if needed
         if !self.pipeline_loaded {
             let pc = self.r[15];
+            eprintln!("step_thumb: reloading pipeline from 0x{:08X}", pc);
             self.pipeline_pc[0] = pc;
             self.pipeline[0] = mem.read_half(pc) as u32;
             self.r[15] = self.r[15].wrapping_add(2);
@@ -1856,6 +1880,13 @@ impl Cpu {
         let opcode = self.pipeline[0] as u16;
         let instruction_pc = self.pipeline_pc[0];
         let pc_at_execution = self.r[15];
+
+        if instruction_pc >= 0x08000D60 && instruction_pc <= 0x08000D70 {
+            eprintln!(
+                "step_thumb: opcode=0x{:04X}, pc=0x{:08X}, r15=0x{:08X}",
+                opcode, instruction_pc, self.r[15]
+            );
+        }
 
         self.trace_record(instruction_pc, opcode as u32);
 
@@ -1886,34 +1917,34 @@ impl Cpu {
         // Bits 15-13 determine the instruction category
         let category = (opcode >> 13) & 0x7;
 
-        if instruction_pc < 0x08000000
-            || (instruction_pc >= 0x08000180 && instruction_pc <= 0x080001A0)
-        {
-            eprintln!(
-                "execute_thumb: opcode=0x{:04X}, category=0b{:03b}, PC=0x{:08X}",
-                opcode, category, instruction_pc
-            );
-        }
-
         match category {
             0b000 => {
-                // Category 0: Move shifted register, ADD/SUB immediate
-                if (opcode & 0xF800) == 0x0000
-                    || (opcode & 0xF800) == 0x0800
-                    || (opcode & 0xF800) == 0x1000
-                    || (opcode & 0xF800) == 0x1800
-                {
+                // Category 0: Move shifted register, ADD/SUB register
+                let op11 = (opcode >> 11) & 0x3;
+                if instruction_pc >= 0x08000D60 && instruction_pc <= 0x08000D70 {
+                    eprintln!(
+                        "Cat0: opcode=0x{:04X}, op11={}, PC=0x{:08X}",
+                        opcode, op11, instruction_pc
+                    );
+                }
+                if op11 <= 2 {
+                    // LSL (0), LSR (1), ASR (2)
                     self.thumb_shift_register(opcode)
                 } else {
-                    self.thumb_add_sub_imm(opcode)
+                    // ADD/SUB register (3)
+                    self.thumb_add_sub_reg(opcode)
                 }
             }
             0b001 => {
-                // Category 1: ADD/SUB/CMP/MOV immediate
+                if instruction_pc >= 0x08000D60 && instruction_pc <= 0x08000D70 {
+                    eprintln!("Cat1: opcode=0x{:04X}, PC=0x{:08X}", opcode, instruction_pc);
+                }
                 self.thumb_data_proc_imm(opcode)
             }
             0b010 => {
-                // Category 2: Data processing register
+                if instruction_pc >= 0x08000D60 && instruction_pc <= 0x08000D70 {
+                    eprintln!("Cat2: opcode=0x{:04X}, PC=0x{:08X}", opcode, instruction_pc);
+                }
                 let op = (opcode >> 6) & 0xF;
                 if op <= 0x9 {
                     self.thumb_data_proc_reg(opcode)
@@ -2047,6 +2078,43 @@ impl Cpu {
         self.r[rd] = result;
         self.set_flag_n((result as i32) < 0);
         self.set_flag_z(result == 0);
+        self.r[15] = self.r[15].wrapping_add(2);
+        1
+    }
+
+    fn thumb_add_sub_reg(&mut self, opcode: u16) -> u32 {
+        let op = (opcode >> 9) & 0x1;
+        let rm = ((opcode >> 6) & 0x7) as usize;
+        let rn = ((opcode >> 3) & 0x7) as usize;
+        let rd = (opcode & 0x7) as usize;
+
+        let rn_val = self.r[rn];
+        let rm_val = self.r[rm];
+
+        if op == 0 {
+            // ADD Rd, Rn, Rm
+            let (result, overflow) = rn_val.overflowing_add(rm_val);
+            self.r[rd] = result;
+            self.set_flag_n((result as i32) < 0);
+            self.set_flag_z(result == 0);
+            self.set_flag_c(overflow);
+            self.set_flag_v(
+                ((rn_val as i32) > 0 && (rm_val as i32) > 0 && (result as i32) < 0)
+                    || ((rn_val as i32) < 0 && (rm_val as i32) < 0 && (result as i32) > 0),
+            );
+        } else {
+            // SUB Rd, Rn, Rm
+            let (result, overflow) = rn_val.overflowing_sub(rm_val);
+            self.r[rd] = result;
+            self.set_flag_n((result as i32) < 0);
+            self.set_flag_z(result == 0);
+            self.set_flag_c(!overflow);
+            self.set_flag_v(
+                ((rn_val as i32) > 0 && (rm_val as i32) < 0 && (result as i32) < 0)
+                    || ((rn_val as i32) < 0 && (rm_val as i32) > 0 && (result as i32) > 0),
+            );
+        }
+
         self.r[15] = self.r[15].wrapping_add(2);
         1
     }
@@ -2533,29 +2601,19 @@ impl Cpu {
 
         let mut addr = self.r[13];
 
-        eprintln!(
-            "thumb_push_pop: load={}, sp=0x{:08X}, reg_list=0x{:02X}, pc_lr={}, PC=0x{:08X}",
-            load, addr, reg_list, pc_lr, self.r[15]
-        );
-
         if load {
             // POP (load from stack)
-            let mut pop_addr = addr;
             for i in 0..8 {
                 if reg_list & (1 << i) != 0 {
-                    let val = mem.read_word(pop_addr);
-                    eprintln!("  POP R{}: 0x{:08X} from [0x{:08X}]", i, val, pop_addr);
-                    self.r[i] = val;
-                    pop_addr = pop_addr.wrapping_add(4);
+                    self.r[i] = mem.read_word(addr);
+                    addr = addr.wrapping_add(4);
                 }
             }
             if pc_lr {
-                let pc_val = mem.read_word(pop_addr);
-                eprintln!("  POP PC: 0x{:08X} from [0x{:08X}]", pc_val, pop_addr);
-                self.r[15] = pc_val & !1; // Return to ARM mode if bit 0 is 0
-                pop_addr = pop_addr.wrapping_add(4);
+                self.r[15] = mem.read_word(addr) & !1; // Return to ARM mode if bit 0 is 0
+                addr = addr.wrapping_add(4);
             }
-            self.r[13] = pop_addr;
+            self.r[13] = addr;
         } else {
             // PUSH (store to stack)
             if pc_lr {
@@ -2585,10 +2643,6 @@ impl Cpu {
         let reg_list = opcode & 0xFF;
 
         let mut addr = self.r[rb];
-
-        #[cfg(debug_assertions)]
-        eprintln!("thumb_load_store_multiple: load={}, rb=R{}, reg_list=0x{:02X}, addr=0x{:08X}, PC=0x{:08X}",
-            load, rb, reg_list, addr, self.r[15]);
 
         if load {
             for i in 0..8 {

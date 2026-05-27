@@ -19,6 +19,23 @@ fn main() {
         }
     }
 
+    // Debug: Check ROM loading
+    let word0 = gba.mem_mut().read_word(0x08000000);
+    let word1 = gba.mem_mut().read_word(0x08000004);
+    println!("ROM at 0x08000000: 0x{:08X}", word0);
+    println!("ROM at 0x08000004: 0x{:08X}", word1);
+    println!("CPU PC after reset: 0x{:08X}", gba.cpu().get_pc());
+
+    // Run a few steps and check state
+    for i in 0..1000 {
+        gba.step();
+    }
+    println!("After 1000 steps:");
+    println!("  PC: 0x{:08X}", gba.cpu().get_pc());
+    println!("  R12: {}", gba.cpu().get_reg(12));
+    println!("  DISPCNT: 0x{:04X}", gba.mem_mut().read_half(0x04000000));
+    println!("  VCOUNT: {}", gba.mem_mut().read_half(0x04000006));
+
     let mut framebuffer = vec![0u32; 240 * 160];
     let start = Instant::now();
 

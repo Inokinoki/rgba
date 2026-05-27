@@ -31,8 +31,17 @@ fn main() {
     println!("IRQ handler at 0x03007FFC: 0x{:08X}", irq_handler);
 
     // Run a few steps and check state
+    let mut last_pc = gba.cpu().get_pc();
     for i in 0..10000 {
         let pc = gba.cpu().get_pc();
+
+        // Detect PC jumps to BIOS
+        if pc < 0x00004000 && last_pc >= 0x08000000 {
+            eprintln!(
+                "Step {}: PC jumped from 0x{:08X} to BIOS 0x{:08X}",
+                i, last_pc, pc
+            );
+        }
 
         // Check if we're about to read from BIOS
         if pc < 0x00004000 {
@@ -44,6 +53,7 @@ fn main() {
         }
 
         gba.step();
+        last_pc = gba.cpu().get_pc();
 
         if i % 1000 == 0 {
             let pc = gba.cpu().get_pc();
@@ -53,6 +63,7 @@ fn main() {
             }
         }
     }
+
     println!("After steps:");
     println!("  PC: 0x{:08X}", gba.cpu().get_pc());
     println!("  R12: {}", gba.cpu().get_reg(12));

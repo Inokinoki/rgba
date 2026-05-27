@@ -27,10 +27,17 @@ fn main() {
     println!("CPU PC after reset: 0x{:08X}", gba.cpu().get_pc());
 
     // Run a few steps and check state
-    for i in 0..1000 {
+    for i in 0..10000 {
         gba.step();
+        if i % 1000 == 0 {
+            let pc = gba.cpu().get_pc();
+            if pc < 0x08000000 || pc > 0x0E000000 {
+                println!("Step {}: PC jumped to invalid address 0x{:08X}", i, pc);
+                break;
+            }
+        }
     }
-    println!("After 1000 steps:");
+    println!("After steps:");
     println!("  PC: 0x{:08X}", gba.cpu().get_pc());
     println!("  R12: {}", gba.cpu().get_reg(12));
     println!("  DISPCNT: 0x{:04X}", gba.mem_mut().read_half(0x04000000));

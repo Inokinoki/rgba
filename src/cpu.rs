@@ -2565,6 +2565,12 @@ impl Cpu {
 
         let mut addr = self.r[rb];
 
+        #[cfg(debug_assertions)]
+        if self.r[15] < 0x08000000 {
+            eprintln!("thumb_load_store_multiple: load={}, rb=R{}, reg_list=0x{:02X}, addr=0x{:08X}, PC=0x{:08X}",
+                load, rb, reg_list, addr, self.r[15]);
+        }
+
         if load {
             for i in 0..8 {
                 if reg_list & (1 << i) != 0 {

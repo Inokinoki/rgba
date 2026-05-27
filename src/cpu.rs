@@ -1636,45 +1636,44 @@ impl Cpu {
     }
 
     fn execute_arm_swi(&mut self, opcode: u32, mem: &mut super::Memory) -> u32 {
-        mem.set_bios_read_return(0xE3A02004);
-
+        // Save current state for BIOS call
         let swi_func = opcode & 0xFFFFFF;
+        let instruction_pc = self.r[15].wrapping_sub(8); // PC was advanced by 8
 
-        // For Thumb mode, SWI number is in R7 (but we handle Thumb SWI separately)
-
-        // Handle BIOS function calls
-        // GBA BIOS uses the upper byte of the SWI comment field (bits 23-16)
-        // Some ROMs also use the lower byte (bits 7-0)
-        // Try upper byte first, then fall back to lower byte
+        // Determine SWI number (upper byte or lower byte)
         let swi_num = if (swi_func >> 16) != 0 {
             (swi_func >> 16) & 0xFF
         } else {
             swi_func & 0xFF
         };
+
+        // Set BIOS read return value for open bus
+        mem.set_bios_read_return(0xE25EF004);
+
+        // Handle BIOS function calls
         match swi_num {
             0x00 => {
                 // SoftReset - reset the system
                 self.reset();
                 self.set_pc(0x08000000);
+                return 3;
             }
             0x01 => {
                 // RegisterRamReset - reset memory regions
-                // Simplified: just return
-                self.r[15] = self.r[14];
+                // Just return to caller
             }
             0x02 | 0x03 => {
-                // Halt / Stop - not really implementable without interrupts
-                self.r[15] = self.r[14];
+                // Halt / Stop - wait for interrupt
+                // Set HALT state in memory
+                mem.halt_pending = true;
             }
             0x04 => {
-                // IntrWait - wait for interrupt
-                // For now, just return (won't actually wait)
-                self.r[15] = self.r[14];
+                // IntrWait - wait for specific interrupt
+                // For now, just return
             }
             0x05 => {
                 // VBlankIntrWait - wait for VBlank interrupt
-                // For now, just return (won't actually wait)
-                self.r[15] = self.r[14];
+                mem.halt_pending = true;
             }
             0x06 => {
                 // Div - signed division
@@ -1682,73 +1681,118 @@ impl Cpu {
                 let r1 = self.r[1] as i32;
                 if r1 != 0 {
                     self.r[0] = r0.wrapping_div(r1) as u32;
+                    self.r[1] = (r0 as i32).wrapping_div(r1) as u32;
                     self.r[3] = r0.wrapping_rem(r1) as u32;
                 } else {
                     self.r[0] = if r0 >= 0 { 0x7FFFFFFF } else { 0x80000000 };
+                    self.r[1] = self.r[0];
                     self.r[3] = self.r[0];
                 }
-                self.r[15] = self.r[14];
             }
-            0x07 | 0x08 => {
-                // DivArm / Sqrt
-                if (swi_func & 0xFF) == 0x07 {
-                    // DivArm: same as Div but R0 and R1 are swapped
-                    let r0 = self.r[1] as i32;
-                    let r1 = self.r[0] as i32;
-                    if r1 != 0 {
-                        self.r[1] = r0.wrapping_div(r1) as u32;
-                        self.r[3] = r0.wrapping_rem(r1) as u32;
-                    } else {
-                        self.r[1] = if r0 >= 0 { 0x7FFFFFFF } else { 0x80000000 };
-                        self.r[3] = self.r[1];
-                    }
-                    self.r[15] = self.r[14];
+            0x07 => {
+                // DivArm - same as Div but R0 and R1 are swapped
+                let r0 = self.r[1] as i32;
+                let r1 = self.r[0] as i32;
+                if r1 != 0 {
+                    self.r[0] = r0.wrapping_div(r1) as u32;
+                    self.r[1] = self.r[0];
+                    self.r[3] = r0.wrapping_rem(r1) as u32;
                 } else {
-                    // Sqrt - unsigned square root
-                    let r0 = self.r[0] as f64;
-                    self.r[0] = (r0.sqrt()) as u32;
-                    self.r[15] = self.r[14];
+                    self.r[0] = if r0 >= 0 { 0x7FFFFFFF } else { 0x80000000 };
+                    self.r[1] = self.r[0];
+                    self.r[3] = self.r[0];
+                }
+            }
+            0x08 => {
+                // Sqrt - unsigned square root
+                let r0 = self.r[0] as f64;
+                self.r[0] = (r0.sqrt()) as u32;
+            }
+            0x0B => {
+                // CpuSet - copy or fill memory
+                let src = self.r[0];
+                let dst = self.r[1];
+                let cnt = self.r[2];
+                let fixed_src = (cnt >> 24) & 1 != 0;
+                let fixed_dst = (cnt >> 24) & 2 != 0;
+                let fill = (cnt >> 24) & 4 != 0;
+                let count = cnt & 0x1FFFFF;
+                let is_32bit = (cnt >> 26) & 1 != 0;
+
+                if fill {
+                    // Fill mode
+                    if is_32bit {
+                        let val = mem.read_word(src);
+                        for i in 0..count {
+                            mem.write_word(dst + i * 4, val);
+                        }
+                    } else {
+                        let val = mem.read_half(src);
+                        for i in 0..count {
+                            mem.write_half(dst + i * 2, val);
+                        }
+                    }
+                } else {
+                    // Copy mode
+                    let mut s = src;
+                    let mut d = dst;
+                    for _ in 0..count {
+                        if is_32bit {
+                            let val = mem.read_word(s);
+                            mem.write_word(d, val);
+                        } else {
+                            let val = mem.read_half(s);
+                            mem.write_half(d, val);
+                        }
+                        if !fixed_src {
+                            s += if is_32bit { 4 } else { 2 };
+                        }
+                        if !fixed_dst {
+                            d += if is_32bit { 4 } else { 2 };
+                        }
+                    }
+                }
+            }
+            0x0C => {
+                // CpuFastSet - fast copy or fill memory (32-bit only, 32-byte blocks)
+                let src = self.r[0];
+                let dst = self.r[1];
+                let cnt = self.r[2];
+                let fill = (cnt >> 24) & 1 != 0;
+                let count = (cnt & 0x1FFFFF) / 8; // Number of 32-byte blocks
+
+                if fill {
+                    let val = mem.read_word(src);
+                    for i in 0..count * 8 {
+                        mem.write_word(dst + i * 4, val);
+                    }
+                } else {
+                    let mut s = src;
+                    let mut d = dst;
+                    for _ in 0..count * 8 {
+                        let val = mem.read_word(s);
+                        mem.write_word(d, val);
+                        s += 4;
+                        d += 4;
+                    }
                 }
             }
             0x0E => {
-                // Sqrt - square root
-                let r0 = self.r[0] as f64;
-                self.r[0] = (r0.sqrt()) as u32;
-                self.r[15] = self.r[14];
+                // BgAffineSet - calculate BG affine parameters
+                // This is complex, just return for now
             }
-            0x0B => {
-                // CpuSet - copy/fill memory
-                let src = self.r[0];
-                let dst = self.r[1];
-                let control = self.r[2];
-                let word_size = if (control & 0x04000000) != 0 { 4 } else { 2 };
-                let count = (control & 0x000FFFFF) as usize;
-                let fill = (control & 0x01000000) != 0;
-
-                for i in 0..count {
-                    let s = if fill {
-                        src
-                    } else {
-                        src.wrapping_add((i as u32) * word_size)
-                    };
-                    let d = dst.wrapping_add((i as u32) * word_size);
-                    if word_size == 4 {
-                        let val = mem.read_word(s);
-                        mem.write_word(d, val);
-                    } else {
-                        let val = mem.read_half(s) as u32;
-                        mem.write_half(d, val as u16);
-                    }
-                }
-                self.r[15] = self.r[14];
+            0x0F => {
+                // ObjAffineSet - calculate OBJ affine parameters
+                // This is complex, just return for now
             }
             _ => {
-                // Unknown SWI - just return
-                self.r[15] = self.r[14];
+                // Unknown SWI, just return
             }
         }
 
-        3 + 3 // SWI takes 3 cycles + 3 for return
+        // Return to caller (LR contains return address)
+        self.r[15] = self.r[14];
+        3 // SWI takes 3 cycles
     }
 
     fn step_thumb(&mut self, mem: &mut super::Memory) -> u32 {
@@ -2544,81 +2588,143 @@ impl Cpu {
     }
 
     fn thumb_software_interrupt(&mut self, mem: &mut super::Memory) -> u32 {
-        mem.set_bios_read_return(0xE3A02004);
-
+        // Save current state for BIOS call
         let swi_num = self.r[7];
+        let instruction_pc = self.r[15].wrapping_sub(4); // PC was advanced
+
+        // Set BIOS read return value for open bus
+        mem.set_bios_read_return(0xE25EF004);
 
         // Handle BIOS function calls
         match swi_num {
             0x00 => {
                 // SoftReset
                 self.reset();
-                self.r[15] = 0x08000001; // Thumb mode
+                self.set_pc(0x08000000);
+                return 2 + 2;
             }
             0x01 => {
-                // RegisterRamReset
-                self.r[15] = self.r[14] | 1; // Return in Thumb mode
+                // RegisterRamReset - just return
             }
             0x02 | 0x03 => {
                 // Halt / Stop
-                self.r[15] = self.r[14] | 1;
+                mem.halt_pending = true;
             }
             0x04 => {
                 // IntrWait
-                self.r[15] = self.r[14] | 1;
+                mem.halt_pending = true;
             }
             0x05 => {
                 // VBlankIntrWait
-                self.r[15] = self.r[14] | 1;
+                mem.halt_pending = true;
             }
             0x06 => {
-                // Div
-                let r0 = self.r[0];
-                let r1 = self.r[1];
+                // Div - signed division
+                let r0 = self.r[0] as i32;
+                let r1 = self.r[1] as i32;
                 if r1 != 0 {
-                    self.r[0] = r0 / r1;
-                    self.r[3] = r0 % r1;
+                    self.r[0] = r0.wrapping_div(r1) as u32;
+                    self.r[1] = (r0 as i32).wrapping_div(r1) as u32;
+                    self.r[3] = r0.wrapping_rem(r1) as u32;
                 } else {
-                    self.r[0] = 0xFFFFFFFF;
-                    self.r[3] = r0;
+                    self.r[0] = if r0 >= 0 { 0x7FFFFFFF } else { 0x80000000 };
+                    self.r[1] = self.r[0];
+                    self.r[3] = self.r[0];
                 }
-                self.r[15] = self.r[14] | 1;
+            }
+            0x07 => {
+                // DivArm
+                let r0 = self.r[1] as i32;
+                let r1 = self.r[0] as i32;
+                if r1 != 0 {
+                    self.r[0] = r0.wrapping_div(r1) as u32;
+                    self.r[1] = self.r[0];
+                    self.r[3] = r0.wrapping_rem(r1) as u32;
+                } else {
+                    self.r[0] = if r0 >= 0 { 0x7FFFFFFF } else { 0x80000000 };
+                    self.r[1] = self.r[0];
+                    self.r[3] = self.r[0];
+                }
             }
             0x08 => {
-                // DivArm
-                let r0 = self.r[0];
-                let r1 = self.r[1];
-                if r1 != 0 {
-                    self.r[0] = r0 / r1;
-                    self.r[3] = r0 % r1;
-                } else {
-                    self.r[0] = 0xFFFFFFFF;
-                    self.r[3] = r0;
-                }
-                self.r[15] = self.r[14] | 1;
-            }
-            0x0E => {
                 // Sqrt
                 let r0 = self.r[0] as f64;
                 self.r[0] = (r0.sqrt()) as u32;
-                self.r[15] = self.r[14] | 1;
+            }
+            0x0B => {
+                // CpuSet
+                let src = self.r[0];
+                let dst = self.r[1];
+                let cnt = self.r[2];
+                let fixed_src = (cnt >> 24) & 1 != 0;
+                let fixed_dst = (cnt >> 24) & 2 != 0;
+                let fill = (cnt >> 24) & 4 != 0;
+                let count = cnt & 0x1FFFFF;
+                let is_32bit = (cnt >> 26) & 1 != 0;
+
+                if fill {
+                    if is_32bit {
+                        let val = mem.read_word(src);
+                        for i in 0..count {
+                            mem.write_word(dst + i * 4, val);
+                        }
+                    } else {
+                        let val = mem.read_half(src);
+                        for i in 0..count {
+                            mem.write_half(dst + i * 2, val);
+                        }
+                    }
+                } else {
+                    let mut s = src;
+                    let mut d = dst;
+                    for _ in 0..count {
+                        if is_32bit {
+                            let val = mem.read_word(s);
+                            mem.write_word(d, val);
+                        } else {
+                            let val = mem.read_half(s);
+                            mem.write_half(d, val);
+                        }
+                        if !fixed_src {
+                            s += if is_32bit { 4 } else { 2 };
+                        }
+                        if !fixed_dst {
+                            d += if is_32bit { 4 } else { 2 };
+                        }
+                    }
+                }
+            }
+            0x0C => {
+                // CpuFastSet
+                let src = self.r[0];
+                let dst = self.r[1];
+                let cnt = self.r[2];
+                let fill = (cnt >> 24) & 1 != 0;
+                let count = (cnt & 0x1FFFFF) / 8;
+
+                if fill {
+                    let val = mem.read_word(src);
+                    for i in 0..count * 8 {
+                        mem.write_word(dst + i * 4, val);
+                    }
+                } else {
+                    let mut s = src;
+                    let mut d = dst;
+                    for _ in 0..count * 8 {
+                        let val = mem.read_word(s);
+                        mem.write_word(d, val);
+                        s += 4;
+                        d += 4;
+                    }
+                }
             }
             _ => {
-                // Unknown SWI
-                if mem.has_bios() {
-                    // Switch to Supervisor mode and jump to SWI vector
-                    let old_cpsr = self.cpsr;
-                    self.set_mode(Mode::Supervisor);
-                    self.set_spsr(old_cpsr);
-                    self.set_lr(self.r[15]);
-                    self.r[15] = 0x08;
-                    self.set_interrupts_enabled(false);
-                } else {
-                    self.r[15] = self.r[14] | 1;
-                }
+                // Unknown SWI, just return
             }
         }
 
+        // Return to caller (LR contains return address)
+        self.r[15] = self.r[14] | 1; // Thumb mode
         2 + 2 // SWI takes 2 cycles + 2 for return
     }
 

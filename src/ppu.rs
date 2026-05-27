@@ -1201,14 +1201,15 @@ impl Ppu {
         let width = 240usize;
         let y = scanline as usize;
 
+        // Collect 15-bit colors first, then batch convert to 32-bit ARGB
+        let mut colors_15bit = [0u16; 240];
+
         for x in 0..width {
-            let color = match mode {
+            colors_15bit[x] = match mode {
                 0 | 1 | 2 => {
-                    // Tile modes - simplified rendering
                     Self::render_tile_pixel_from_snapshot(snapshot, x as u16, y as u16, palette)
                 }
                 3 => {
-                    // Mode 3: 16-bit bitmap
                     let offset = (y * 240 + x) * 2;
                     if offset + 1 < snapshot.vram.len() {
                         u16::from_le_bytes([snapshot.vram[offset], snapshot.vram[offset + 1]])
@@ -1217,7 +1218,6 @@ impl Ppu {
                     }
                 }
                 4 => {
-                    // Mode 4: 8-bit paletted
                     let offset = y * 240 + x;
                     if offset < snapshot.vram.len() {
                         let idx = snapshot.vram[offset] as usize;
@@ -1233,12 +1233,102 @@ impl Ppu {
                 }
                 _ => 0,
             };
+        }
 
-            // Convert 15-bit color to 32-bit ARGB
-            let r = ((color & 0x1F) as u32 * 255 / 31) << 16;
-            let g = (((color >> 5) & 0x1F) as u32 * 255 / 31) << 8;
-            let b = ((color >> 10) & 0x1F) as u32 * 255 / 31;
-            framebuffer[x] = r | g | b;
+        // Batch convert 15-bit to 32-bit ARGB
+        Self::convert_colors_15bit_to_argb(&colors_15bit, framebuffer);
+    }
+
+    /// Convert 15-bit RGB colors to 32-bit ARGB using SIMD when available
+    #[inline(always)]
+    fn convert_colors_15bit_to_argb(colors: &[u16; 240], framebuffer: &mut [u32]) {
+        #[cfg(target_arch = "aarch64")]
+        {
+            unsafe { Self::convert_colors_15bit_to_argb_neon(colors, framebuffer) }
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            Self::convert_colors_15bit_to_argb_scalar(colors, framebuffer)
+        }
+    }
+
+    /// Scalar fallback for color conversion
+    #[inline(always)]
+    fn convert_colors_15bit_to_argb_scalar(colors: &[u16; 240], framebuffer: &mut [u32]) {
+        for i in 0..240 {
+            let color = colors[i] as u32;
+            let r = ((color & 0x1F) * 255 / 31) << 16;
+            let g = (((color >> 5) & 0x1F) * 255 / 31) << 8;
+            let b = ((color >> 10) & 0x1F) * 255 / 31;
+            framebuffer[i] = r | g | b;
+        }
+    }
+
+    /// NEON-optimized color conversion for aarch64
+    #[cfg(target_arch = "aarch64")]
+    #[target_feature(enable = "neon")]
+    unsafe fn convert_colors_15bit_to_argb_neon(colors: &[u16; 240], framebuffer: &mut [u32]) {
+        use std::arch::aarch64::*;
+
+        // Process 8 pixels at a time (NEON can do 8x u16 -> 8x u32)
+        let mut i = 0;
+        while i + 8 <= 240 {
+            // Load 8 u16 colors
+            let colors_ptr = colors.as_ptr().add(i);
+            let c16 = vld1q_u16(colors_ptr);
+
+            // Extract R, G, B components (5 bits each)
+            let r16 = vandq_u16(c16, vdupq_n_u16(0x1F));
+            let g16 = vandq_u16(vshrq_n_u16(c16, 5), vdupq_n_u16(0x1F));
+            let b16 = vandq_u16(vshrq_n_u16(c16, 10), vdupq_n_u16(0x1F));
+
+            // Widen to u32 and scale 0-31 to 0-255
+            // (x * 255 + 15) / 31 ≈ x * 8.226, but we use (x << 3) | (x >> 2) for speed
+            let r32_lo = vmovl_u16(vget_low_u16(r16));
+            let r32_hi = vmovl_u16(vget_high_u16(r16));
+            let g32_lo = vmovl_u16(vget_low_u16(g16));
+            let g32_hi = vmovl_u16(vget_high_u16(g16));
+            let b32_lo = vmovl_u16(vget_low_u16(b16));
+            let b32_hi = vmovl_u16(vget_high_u16(b16));
+
+            // Scale: (x << 3) | (x >> 2) gives 0-255 range
+            let scale =
+                |x: uint32x4_t| -> uint32x4_t { vorrq_u32(vshlq_n_u32(x, 3), vshrq_n_u32(x, 2)) };
+
+            let r_scaled_lo = scale(r32_lo);
+            let r_scaled_hi = scale(r32_hi);
+            let g_scaled_lo = scale(g32_lo);
+            let g_scaled_hi = scale(g32_hi);
+            let b_scaled_lo = scale(b32_lo);
+            let b_scaled_hi = scale(b32_hi);
+
+            // Shift and combine: (R << 16) | (G << 8) | B
+            let argb_lo = vorrq_u32(
+                vorrq_u32(vshlq_n_u32(r_scaled_lo, 16), vshlq_n_u32(g_scaled_lo, 8)),
+                b_scaled_lo,
+            );
+            let argb_hi = vorrq_u32(
+                vorrq_u32(vshlq_n_u32(r_scaled_hi, 16), vshlq_n_u32(g_scaled_hi, 8)),
+                b_scaled_hi,
+            );
+
+            // Store results
+            let fb_ptr = framebuffer.as_mut_ptr().add(i);
+            vst1q_u32(fb_ptr, argb_lo);
+            vst1q_u32(fb_ptr.add(4), argb_hi);
+
+            i += 8;
+        }
+
+        // Handle remaining pixels with scalar
+        while i < 240 {
+            let color = colors[i] as u32;
+            let r = ((color & 0x1F) * 255 / 31) << 16;
+            let g = (((color >> 5) & 0x1F) * 255 / 31) << 8;
+            let b = ((color >> 10) & 0x1F) * 255 / 31;
+            framebuffer[i] = r | g | b;
+            i += 1;
         }
     }
 

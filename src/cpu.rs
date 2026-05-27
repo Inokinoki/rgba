@@ -1886,6 +1886,15 @@ impl Cpu {
         // Bits 15-13 determine the instruction category
         let category = (opcode >> 13) & 0x7;
 
+        if instruction_pc < 0x08000000
+            || (instruction_pc >= 0x08000180 && instruction_pc <= 0x080001A0)
+        {
+            eprintln!(
+                "execute_thumb: opcode=0x{:04X}, category=0b{:03b}, PC=0x{:08X}",
+                opcode, category, instruction_pc
+            );
+        }
+
         match category {
             0b000 => {
                 // Category 0: Move shifted register, ADD/SUB immediate
@@ -1944,9 +1953,11 @@ impl Cpu {
                 } else if (opcode & 0xFF00) == 0xB000 {
                     self.thumb_add_sp(opcode)
                 } else if (opcode & 0xF600) == 0xB400 {
-                    self.thumb_push_pop(opcode, mem, true)
-                } else if (opcode & 0xF600) == 0xBC00 {
+                    // PUSH (0xB400-0xB5FF)
                     self.thumb_push_pop(opcode, mem, false)
+                } else if (opcode & 0xF600) == 0xBC00 {
+                    // POP (0xBC00-0xBDFF)
+                    self.thumb_push_pop(opcode, mem, true)
                 } else {
                     1
                 }
@@ -2522,19 +2533,29 @@ impl Cpu {
 
         let mut addr = self.r[13];
 
+        eprintln!(
+            "thumb_push_pop: load={}, sp=0x{:08X}, reg_list=0x{:02X}, pc_lr={}, PC=0x{:08X}",
+            load, addr, reg_list, pc_lr, self.r[15]
+        );
+
         if load {
             // POP (load from stack)
+            let mut pop_addr = addr;
             for i in 0..8 {
                 if reg_list & (1 << i) != 0 {
-                    self.r[i] = mem.read_word(addr);
-                    addr = addr.wrapping_add(4);
+                    let val = mem.read_word(pop_addr);
+                    eprintln!("  POP R{}: 0x{:08X} from [0x{:08X}]", i, val, pop_addr);
+                    self.r[i] = val;
+                    pop_addr = pop_addr.wrapping_add(4);
                 }
             }
             if pc_lr {
-                self.r[15] = mem.read_word(addr) & !1; // Return to ARM mode if bit 0 is 0
-                addr = addr.wrapping_add(4);
+                let pc_val = mem.read_word(pop_addr);
+                eprintln!("  POP PC: 0x{:08X} from [0x{:08X}]", pc_val, pop_addr);
+                self.r[15] = pc_val & !1; // Return to ARM mode if bit 0 is 0
+                pop_addr = pop_addr.wrapping_add(4);
             }
-            self.r[13] = addr;
+            self.r[13] = pop_addr;
         } else {
             // PUSH (store to stack)
             if pc_lr {
@@ -2566,10 +2587,8 @@ impl Cpu {
         let mut addr = self.r[rb];
 
         #[cfg(debug_assertions)]
-        if self.r[15] < 0x08000000 {
-            eprintln!("thumb_load_store_multiple: load={}, rb=R{}, reg_list=0x{:02X}, addr=0x{:08X}, PC=0x{:08X}",
-                load, rb, reg_list, addr, self.r[15]);
-        }
+        eprintln!("thumb_load_store_multiple: load={}, rb=R{}, reg_list=0x{:02X}, addr=0x{:08X}, PC=0x{:08X}",
+            load, rb, reg_list, addr, self.r[15]);
 
         if load {
             for i in 0..8 {

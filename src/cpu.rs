@@ -1947,20 +1947,22 @@ impl Cpu {
                     self.thumb_push_pop(opcode, mem, true)
                 } else if (opcode & 0xF600) == 0xBC00 {
                     self.thumb_push_pop(opcode, mem, false)
-                } else if (opcode & 0xF000) == 0xC000 {
-                    self.thumb_load_store_multiple(opcode, mem, true)
-                } else if (opcode & 0xF000) == 0xD000 {
-                    self.thumb_load_store_multiple(opcode, mem, false)
                 } else {
                     1
                 }
             }
             0b110 => {
-                // Category 6: Conditional branch, SWI, unconditional branch
-                if (opcode & 0xF000) == 0xD000 {
-                    self.thumb_branch_cond(opcode, instruction_pc)
-                } else if (opcode & 0xFF00) == 0xDF00 {
-                    self.thumb_software_interrupt(mem)
+                // Category 6: LDMIA/STMIA, conditional branch, SWI
+                if (opcode & 0xF000) == 0xC000 {
+                    // LDMIA/STMIA
+                    let is_load = (opcode >> 11) & 1 != 0;
+                    self.thumb_load_store_multiple(opcode, mem, is_load)
+                } else if (opcode & 0xF000) == 0xD000 {
+                    if (opcode & 0xFF00) == 0xDF00 {
+                        self.thumb_software_interrupt(mem)
+                    } else {
+                        self.thumb_branch_cond(opcode, instruction_pc)
+                    }
                 } else {
                     self.thumb_branch(opcode, instruction_pc)
                 }

@@ -32,11 +32,23 @@ fn main() {
 
     // Run a few steps and check state
     for i in 0..10000 {
+        let pc = gba.cpu().get_pc();
+
+        // Check if we're about to read from BIOS
+        if pc < 0x00004000 {
+            let word = gba.mem_mut().read_word(pc);
+            eprintln!(
+                "Step {}: Executing at BIOS addr 0x{:08X}, instruction=0x{:08X}",
+                i, pc, word
+            );
+        }
+
         gba.step();
+
         if i % 1000 == 0 {
             let pc = gba.cpu().get_pc();
             if pc < 0x08000000 || pc > 0x0E000000 {
-                println!("Step {}: PC jumped to invalid address 0x{:08X}", i, pc);
+                eprintln!("Step {}: PC jumped to invalid address 0x{:08X}", i, pc);
                 break;
             }
         }

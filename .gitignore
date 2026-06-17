@@ -1,0 +1,4 @@
+target/
+*.bmp
+*.ppm
+.ruff_cache/

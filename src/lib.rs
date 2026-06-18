@@ -980,6 +980,9 @@ impl Gba {
         let bldalpha = u16::from_le_bytes([io[0x52], io[0x53]]);
         self.ppu.set_blend_alpha(bldalpha);
 
+        // BLDY (0x0400_0054) — brightness value for mode 2/3
+        self.ppu.set_blend_brightness(io[0x54] as u16);
+
         // Window registers
         let win0h = u16::from_le_bytes([io[0x40], io[0x41]]);
         let win0v = u16::from_le_bytes([io[0x42], io[0x43]]);

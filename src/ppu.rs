@@ -498,10 +498,12 @@ impl Ppu {
 
         // Check WIN0
         if win0_en {
-            let left = (self.win0_h & 0xFF) as u16;
-            let right = ((self.win0_h >> 8) & 0xFF) as u16;
-            let top = (self.win0_v & 0xFF) as u16;
-            let bottom = ((self.win0_v >> 8) & 0xFF) as u16;
+            // GBATEK: WINxH bits [7:0]=Right, [15:8]=Left
+            //         WINxV bits [7:0]=Bottom, [15:8]=Top
+            let left = ((self.win0_h >> 8) & 0xFF) as u16;
+            let right = (self.win0_h & 0xFF) as u16;
+            let top = ((self.win0_v >> 8) & 0xFF) as u16;
+            let bottom = (self.win0_v & 0xFF) as u16;
 
             if x >= left && x < right && y >= top && y < bottom {
                 // Inside WIN0: use WININ low byte
@@ -511,10 +513,10 @@ impl Ppu {
 
         // Check WIN1
         if win1_en {
-            let left = (self.win1_h & 0xFF) as u16;
-            let right = ((self.win1_h >> 8) & 0xFF) as u16;
-            let top = (self.win1_v & 0xFF) as u16;
-            let bottom = ((self.win1_v >> 8) & 0xFF) as u16;
+            let left = ((self.win1_h >> 8) & 0xFF) as u16;
+            let right = (self.win1_h & 0xFF) as u16;
+            let top = ((self.win1_v >> 8) & 0xFF) as u16;
+            let bottom = (self.win1_v & 0xFF) as u16;
 
             if x >= left && x < right && y >= top && y < bottom {
                 // Inside WIN1: use WININ high byte

@@ -204,6 +204,9 @@ pub struct Memory {
     // IO Registers (1KB)
     io: Box<[u8; 0x400]>,
 
+    // Snapshot of IO registers at VBlank start (for correct rendering)
+    pub vblank_io_snapshot: Option<Vec<u8>>,
+
     // Palette RAM (1KB) - 2KB actually, split BG/OBJ
     palette: Box<[u8; 0x400]>,
 
@@ -413,6 +416,7 @@ impl Memory {
             wram: Box::new([0u8; 0x40000]),
             iwram,
             io: Box::new([0u8; 0x400]),
+            vblank_io_snapshot: None,
             palette: Box::new([0u8; 0x400]),
             vram: Box::new([0u8; 0x18000]),
             oam: Box::new([0u8; 0x400]),

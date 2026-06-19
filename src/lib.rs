@@ -287,9 +287,20 @@ impl Gba {
     pub fn run_frame(&mut self) {
         // GBA runs at ~16.78 MHz
         // Each frame is 280896 cycles (59.57 Hz)
+        // Track visible-area IO state for correct rendering
         let mut cycles_total = 0u32;
+        let mut vblank_snapshot_taken = false;
         while cycles_total < 280896 {
-            cycles_total += self.step();
+            let c = self.step();
+            cycles_total += c;
+
+            // At VBlank start (scanline 160), snapshot IO registers for rendering
+            // Games change window/blend registers during VBlank for the NEXT frame;
+            // we need the values that were active during visible display
+            if !vblank_snapshot_taken && self.ppu.get_vcount() == 160 {
+                self.mem.vblank_io_snapshot = Some(self.mem.io().to_vec());
+                vblank_snapshot_taken = true;
+            }
         }
     }
 
@@ -941,6 +952,7 @@ impl Gba {
 
     /// Sync PPU state from Memory (full)
     /// This must be called before rendering to get the latest state
+    /// Uses VBlank snapshot if available (captures visible-area register state)
     pub fn sync_ppu_full(&mut self) {
         // First sync from VRAM
         self.ppu.sync_vram(self.mem.vram());
@@ -948,8 +960,15 @@ impl Gba {
         // Sync OAM
         self.ppu.sync_oam(self.mem.oam());
 
-        // Sync IO registers
-        let io = self.mem.io();
+        // Use VBlank snapshot for IO registers if available
+        // This captures the register state at end of visible display,
+        // before the game modifies them during VBlank for the next frame
+        let snapshot = self.mem.vblank_io_snapshot.take();
+        let io: Vec<u8> = match &snapshot {
+            Some(s) => s.clone(),
+            None => self.mem.io().to_vec(),
+        };
+        let io = io.as_slice();
 
         // DISPCNT (0x0400_0000)
         let dispcnt = u16::from_le_bytes([io[0], io[1]]);
